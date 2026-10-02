@@ -19,6 +19,7 @@ When you release the key, the plugin can rewrite the text into a clear prompt wi
 ## Features
 
 - **Hold to talk.** Hold <kbd>Space</kbd> to record. Release it to finish. This works on an empty prompt and in the middle of text.
+- **Your own shortcut.** Do not want to hold Space? Set a shortcut such as <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>V</kbd>: press it to start, press it again to stop. You can also turn hold-Space off.
 - **Live view.** A timer, a microphone level meter, your words, and the English translation update while you speak.
 - **Persian, English, or mixed.** Persian is translated to English. English stays as you said it.
 - **Knows your project.** The project name, git branch and file names go to the speech recognizer. Names like `auth.ts` and `parseOrder` come out spelled correctly.
@@ -97,11 +98,38 @@ When you release the key, the plugin can rewrite the text into a clear prompt wi
 A single tap of <kbd>Space</kbd> still types a space.
 To record without holding a key, run `/fa`. Then run `/fa` again, or press **⏹ Stop**, to finish.
 
+### Choose how to start a recording
+
+You can use hold-Space, your own shortcut, or both.
+
+1. Set a shortcut:
+
+   ```text
+   /fa key ctrl+x v
+   ```
+
+   The shortcut must have a modifier (`ctrl+r`, `meta+k`) or be a chord (`ctrl+x v`). A plain key would type a character.
+   Choose a combination that Claude Code does not already use. The [keybindings docs](https://code.claude.com/docs/en/keybindings) list the defaults.
+
+2. Press the shortcut to start. Press it again to stop. If you hold a shortcut that repeats, such as `meta+k`, the recording stops when you release it.
+
+3. Optional: turn hold-Space off, so that <kbd>Space</kbd> only types:
+
+   ```text
+   /fa space off
+   ```
+
+To remove the shortcut, run `/fa key off`. This also turns hold-Space on again.
+
+The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the file are kept.
+
 ### Commands
 
 | Command | What it does |
 | --- | --- |
 | `/fa` | Start or stop a recording without holding a key. |
+| `/fa key [shortcut]` | Show or set your own shortcut, for example `/fa key ctrl+x v`. `/fa key off` removes it. |
+| `/fa space [on\|off]` | Turn hold-Space to talk on or off. |
 | `/fa mode [name]` | Show or set the cleanup mode. Without a name, it moves to the next mode. |
 | `/fa polish` | Turn the cleanup on (`prompt`) or off (`exact`). |
 | `/fa send` | Turn auto-send on or off. |
@@ -110,6 +138,8 @@ To record without holding a key, run `/fa`. Then run `/fa` again, or press **⏹
 | `/fa help` | Show all commands. |
 
 You can also click the **✨ mode** and **⏎ send** buttons above the prompt.
+
+With auto-send on, Claude Code shows the prompt as "The persian-voice plugin sent a message". Claude Code adds this label to every prompt that a plugin sends, and a plugin cannot remove it. Claude still treats the text as your request.
 
 ### Modes
 
@@ -129,7 +159,7 @@ The rewrite never adds requirements that you did not say.
 
 ```mermaid
 flowchart LR
-    A["Hold Space"] --> B["stream.py<br/>ffmpeg reads the mic"]
+    A["Hold Space<br/>or your shortcut"] --> B["stream.py<br/>ffmpeg reads the mic"]
     B -- "audio" --> C["Soniox<br/>speech to text + translation"]
     C -- "words + English, live" --> D["REC panel<br/>above the prompt"]
     D -- "release Space" --> E["Rule cleanup<br/>remove fillers"]
@@ -140,7 +170,7 @@ flowchart LR
     G -- "Enter, or auto-send" --> I["Claude Code"]
 ```
 
-1. The plugin (`hooks/register.tsx`) watches the prompt box. A held key sends the same character many times. When spaces repeat fast, the plugin starts a recording.
+1. The plugin (`hooks/register.tsx`) watches the prompt box. A held key sends the same character many times. When spaces repeat fast, the plugin starts a recording. A shortcut is a Claude Code keybinding that presses the plugin's **Talk** button.
 2. `stt/stream.py` reads the microphone with ffmpeg and sends the audio to Soniox. It prints the live text and the microphone level 6–7 times each second.
 3. When you release the key, the plugin tells `stream.py` to stop. Soniox then confirms the last words and their translation.
 4. The plugin cleans the text and, if necessary, asks Claude to rewrite it. Then it puts the text in the prompt box.
@@ -164,7 +194,7 @@ The plugin also adds the project name, the git branch and the project's file nam
 
 ### Settings
 
-Your mode, auto-send and microphone choices are saved in Claude Code's plugin store. They apply to all projects and sessions.
+Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in Claude Code's plugin store. They apply to all projects and sessions.
 
 ### Environment variables
 
@@ -192,7 +222,8 @@ Your mode, auto-send and microphone choices are saved in Claude Code's plugin st
 | "Voice: nothing heard" | Check the microphone with `/fa mic`. Check that your terminal has microphone access in System Settings → Privacy & Security → Microphone. |
 | "No key: set SONIOX_API_KEY …" | Do step 4 of [Install](#install). |
 | Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the plugin folder. |
-| The cursor moves back and forth while you hold <kbd>Space</kbd> | This is a known limitation. Claude Code draws each key before a plugin can remove it. It occurs only while you record. |
+| The cursor moves back and forth while you hold <kbd>Space</kbd> | This is a known limitation of hold-Space. Claude Code draws each key before a plugin can remove it. It occurs only while you record. To avoid it, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
+| The shortcut does nothing | Run `/fa key` to see it. Check that no other binding in `~/.claude/keybindings.json` uses the same keys. |
 
 ## Development
 

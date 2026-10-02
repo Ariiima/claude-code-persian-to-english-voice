@@ -7,15 +7,28 @@ import { needsModel, newTerms, preclean } from './register'
 type Said = { fa: string; en: string }
 
 // Mocks stream.py, the prompt box, the store and the model. `said` is what stream.py hears.
-function setup($: Engine, on: On, opts: { said: Said; box?: string; prefs?: object; reply?: string | null }) {
+function setup(
+  $: Engine,
+  on: On,
+  opts: { said: Said; box?: string; prefs?: object; reply?: string | null; files?: Record<string, string> },
+) {
   const clock = mock.clock(on)
   let stop = () => {}
   const stopped = new Promise<void>(resolve => (stop = resolve))
-  const out = { box: opts.box ?? '', submitted: '', modelCalls: 0, spawned: 0, killed: false }
-  on('fs.write', async () => {
-    stop()
+  const out = {
+    box: opts.box ?? '',
+    submitted: '',
+    modelCalls: 0,
+    spawned: 0,
+    killed: false,
+    files: { ...opts.files } as Record<string, string>,
+  }
+  on('fs.write', async (_$, e) => {
+    if (e.path.endsWith('.stop')) stop()
+    else out.files[e.path] = e.text
     return { value: undefined }
   })
+  on('fs.read', async (_$, e) => ({ value: out.files[e.path] ?? '' }))
   on('prompt.read', async () => ({ value: { text: out.box, cursor: out.box.length } }))
   on('prompt.fill', async (_$, e) => {
     out.box = e.mode === 'insert' ? out.box + e.text : e.text
@@ -124,6 +137,43 @@ test('a single leading space then typing: the tentative recording is cancelled, 
   await t.release()
   expect(t.out.killed).toBe(true)
   expect(t.out.box).toBe('a')
+})
+
+const KB = '/home/test/.claude/keybindings.json'
+const fa = ($: Engine, args: string) =>
+  $.command.run({ command: 'fa', args, origin: { kind: 'composer' }, presentation: {} } as never) as Promise<{ text: string }>
+
+test('/fa key writes the shortcut to keybindings.json and keeps the other bindings', async ($, on) => {
+  const old = { bindings: [{ context: 'Chat', bindings: { 'ctrl+e': 'chat:externalEditor', f2: 'app:toggleDiffPreSession' } }] }
+  const t = setup($, on, { said: { fa: '', en: '' }, files: { [KB]: JSON.stringify(old) } })
+  on('store.set', async () => ({ value: undefined }))
+  expect((await fa($, 'key ctrl+x v')).text).toContain('ctrl+x v')
+  const kb = JSON.parse(t.out.files[KB] ?? '{}')
+  expect(kb.bindings[0].bindings).toEqual({ 'ctrl+e': 'chat:externalEditor' }) // the old binding of the action is gone
+  expect(kb.bindings[1]).toEqual({ context: 'Global', bindings: { 'ctrl+x v': 'app:toggleDiffPreSession' } })
+  expect((await fa($, 'key v')).text).toContain('cannot be a shortcut') // a bare key would type
+})
+
+test('/fa space off: holding Space only types', async ($, on) => {
+  const t = setup($, on, { said: { fa: '', en: 'x' } })
+  on('store.set', async () => ({ value: undefined }))
+  await fa($, 'space off')
+  await t.hold()
+  expect(t.out.spawned).toBe(0)
+  expect(t.out.box).toBe('    ')
+})
+
+test('the shortcut button: press to start, press again to stop', async ($, on) => {
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' } })
+  on('store.set', async () => ({ value: undefined }))
+  await fa($, 'key ctrl+x v')
+  const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
+  await ui.press({ key: 'talk' })
+  await t.clock.advance(2000)
+  expect(t.out.spawned).toBe(1)
+  await ui.press({ key: 'stop' })
+  await t.release()
+  expect(t.out.box).toBe('Run the tests')
 })
 
 test('auto-send: the text is sent, not left in the box', async ($, on) => {

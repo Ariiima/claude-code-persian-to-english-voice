@@ -5,7 +5,15 @@ export type Live = { fa: string; en: string; lvl?: number; ms?: number; done?: b
 export type Mode = 'exact' | 'prompt' | 'chat' | 'spec' | 'commit'
 
 /** The person's settings, global ($.store). */
-export type Prefs = { mode: Mode; autoSend: boolean; mic: string }
+export type Prefs = {
+  mode: Mode
+  autoSend: boolean
+  mic: string
+  /** Holding Space records. Off: Space only types. */
+  holdSpace: boolean
+  /** The person's own shortcut (a keybinding), or null for none. */
+  shortcut: string | null
+}
 
 /** The last polished fill, so "Use raw" can swap the plain translation back. */
 export type Undo = { raw: string; polished: string }

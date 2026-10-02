@@ -34,7 +34,7 @@ const POLISH_MODEL = 'claude-sonnet-5-5'
 const POLISH_MS = 8000 // slower than this: use the plain translation
 
 const live = atom({ plugin: 'persian-voice', key: 'live' } as const, null as Live | null)
-const DEFAULT_PREFS: Prefs = { mode: 'prompt', autoSend: false, mic: 'default' }
+const DEFAULT_PREFS: Prefs = { mode: 'prompt', autoSend: false, mic: 'default', holdSpace: true, shortcut: null }
 const prefs = atom({ plugin: 'persian-voice', key: 'prefs' } as const, DEFAULT_PREFS)
 const undo = atom({ plugin: 'persian-voice', key: 'undo' } as const, null as Undo | null)
 
@@ -123,11 +123,75 @@ async function loadPrefs($: EngineInterface): Promise<Prefs> {
   return { ...DEFAULT_PREFS, mode: old === false ? 'exact' : 'prompt' }
 }
 
+// A copy of prefs.holdSpace the prompt.edit hook reads without waiting (see there).
+let isHoldSpace = DEFAULT_PREFS.holdSpace
+
+async function applyPrefs($: EngineInterface, p: Prefs) {
+  isHoldSpace = p.holdSpace
+  await update($, prefs, () => p)
+}
+
 async function savePrefs($: EngineInterface, change: Partial<Prefs>) {
   const p = { ...(await loadPrefs($)), ...change }
   await $.store.set('prefs', p)
-  await update($, prefs, () => p)
+  await applyPrefs($, p)
   return p
+}
+
+// ---------- Custom shortcut: a keybinding to an engine action the talk Button names ----------
+
+// ponytail: a plugin cannot define its own keybinding action, so it borrows one with no default key
+// whose handler only lives in Claude Code's old diff panel (off unless cc-plugin-diff is disabled)
+const ACTION = 'app:toggleDiffPreSession'
+// Claude Code fires a Button's action only for a chord or a key with a modifier; a bare key would type.
+const SHORTCUT = /^(?:ctrl|meta|alt|shift|cmd)\+\S+(?: \S+)?$/
+
+type Keybindings = { bindings?: { context: string; bindings: Record<string, string | null> }[]; [k: string]: unknown }
+
+// Binds `chord` (or nothing, for null) to ACTION in ~/.claude/keybindings.json, keeping the rest.
+async function bindShortcut($: EngineInterface, chord: string | null) {
+  const file = `${(await paths($)).home}/.claude/keybindings.json`
+  const text = await $.fs.read(file).catch(() => '')
+  const kb: Keybindings = typeof text === 'string' && text.trim() ? JSON.parse(text) : {}
+  kb.bindings ??= []
+  for (const block of kb.bindings) {
+    for (const [key, action] of Object.entries(block.bindings)) if (action === ACTION) delete block.bindings[key]
+  }
+  if (chord) {
+    let global = kb.bindings.find(b => b.context === 'Global')
+    if (!global) kb.bindings.push((global = { context: 'Global', bindings: {} }))
+    global.bindings[chord] = ACTION
+  }
+  await $.fs.write(file, `${JSON.stringify(kb, null, 2)}\n`)
+}
+
+async function keyCommand($: EngineInterface, arg: string) {
+  if (!arg) {
+    const p = await loadPrefs($)
+    return p.shortcut
+      ? `⌨ Shortcut: ${p.shortcut} (press to start, press again to stop). Remove it: /fa key off`
+      : '⌨ No shortcut. Set one, for example: /fa key ctrl+x v'
+  }
+  if (arg === 'off') {
+    await bindShortcut($, null)
+    const p = await savePrefs($, { shortcut: null, holdSpace: true })
+    return `⌨ Shortcut removed. Hold Space is ${p.holdSpace ? 'on' : 'off'}.`
+  }
+  const chord = arg.toLowerCase()
+  if (!SHORTCUT.test(chord)) {
+    return `"${arg}" cannot be a shortcut. Use a key with ctrl, meta, alt or shift (ctrl+r), or a chord (ctrl+x v).`
+  }
+  await bindShortcut($, chord)
+  await savePrefs($, { shortcut: chord })
+  return `⌨ Shortcut: ${chord}. Press it to start, and again to stop.\nIt is saved in ~/.claude/keybindings.json. Choose a combination Claude Code does not already use.\nTo stop holding Space: /fa space off`
+}
+
+async function spaceCommand($: EngineInterface, arg: string) {
+  const cur = await loadPrefs($)
+  const on = arg === 'on' ? true : arg === 'off' ? false : !cur.holdSpace
+  const p = await savePrefs($, { holdSpace: on })
+  const other = p.shortcut ? `Use ${p.shortcut} or /fa.` : 'Set a shortcut with /fa key ctrl+x v, or use /fa.'
+  return p.holdSpace ? '␣ Hold Space to talk: on' : `␣ Hold Space to talk: off. Space only types now. ${other}`
 }
 
 async function setMode($: EngineInterface, mode?: Mode) {
@@ -225,9 +289,12 @@ let levels: number[] = [] // recent mic levels for the meter
 let latest: Live = { fa: '', en: '' } // stream.py's last line, also while tentative (not drawn yet)
 let lastFill: string | null = null // dictated text in the box, to learn from the person's edits
 
+let isSpaceHold = false // this recording was started by holding Space (not the shortcut, button or /fa)
+
 // Synchronous on purpose: the prompt.edit hook calls it before it answers the key (see there).
 function begin($: EngineInterface, held: boolean, tentative = false) {
   isActive = true
+  isSpaceHold = held
   isTentative = tentative
   isCancelled = isStopping = false
   isHeld = held
@@ -237,10 +304,17 @@ function begin($: EngineInterface, held: boolean, tentative = false) {
   background(() => start($))
 }
 
-// The Stop button / `/fa`: start without holding, then stop.
+// The talk / Stop button, its shortcut, and `/fa`: press to start, press again to stop.
+// A shortcut held down repeats; presses closer than HOLD_GAP_MS are that hold, and it ends on release.
 async function press($: EngineInterface) {
-  if (isActive) isStopping = true
-  else begin($, false)
+  const now = await $.clock.now()
+  if (!isActive) {
+    begin($, false)
+    lastPress = now
+  } else if (isHeld || now - lastPress < HOLD_GAP_MS) {
+    isHeld = true
+    lastPress = now
+  } else isStopping = true
 }
 
 // A held key's repeat: keep the recording alive (and show it, if it was tentative).
@@ -393,6 +467,8 @@ async function usePlain($: EngineInterface) {
 const HELP = `Persian voice
   hold space    talk, release to finish
   /fa           start / stop without holding
+  /fa key [k]   your own shortcut, e.g. /fa key ctrl+x v (press to start, again to stop); /fa key off
+  /fa space     hold Space to talk on / off (off: Space only types)
   /fa mode [m]  cleanup: prompt · chat (uses the conversation) · spec · commit · exact
   /fa polish    cleanup on / off (prompt <-> exact)
   /fa send      auto-send on / off
@@ -437,8 +513,7 @@ export const register: Register = on => {
       name: 'fa',
       description: 'Persian/English voice to the prompt box. /fa help for modes, auto-send, mic and words',
     })
-    const p = await loadPrefs($)
-    await update($, prefs, () => p)
+    await applyPrefs($, await loadPrefs($))
     const { terms } = await paths($)
     if (!(await $.fs.exists(terms).catch(() => true))) {
       await $.fs.write(terms,'# Persian voice: words for speech recognition, one per line.\n# A line "persian = english" sets a translation, for example:\n# دیپلوی = deploy\n')
@@ -452,6 +527,7 @@ export const register: Register = on => {
   on('prompt.edit', async ($, e, next) => {
     const isBurst = !e.key && /^ {2,}$/.test(e.inputText) // repeats folded into one edit
     const isSpace = isBurst || (e.key ? e.key.key === ' ' || e.key.key === 'space' : e.inputText === ' ')
+    if (isSpace && !isHoldSpace) return next(e) // `/fa space off`: Space only types
     if (!isSpace) {
       lastSpace = null
       if (isActive && isTentative) isCancelled = true // it was a leading space, then typing
@@ -461,7 +537,7 @@ export const register: Register = on => {
     // time the answer takes: the cursor jumps right, then back. Held space repeats ~30 times a
     // second, so these paths answer at once and keep the clock work for afterwards.
     if (isActive) {
-      if (!isHeld) return next(e) // started by /fa: typing stays normal
+      if (!isSpaceHold) return next(e) // started by the shortcut, button or /fa: typing stays normal
       background(() => repeat($))
       return next({ ...e, inputText: '' })
     }
@@ -488,8 +564,6 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     const r = await next(e)
     if (r.drop !== undefined) return r
-    // Auto-send: the prompt is the person's own words, so it enters as theirs.
-    if (e.origin?.kind === 'plugin' && e.origin.name === 'persian-voice') return { ...r, origin: undefined }
     if (lastFill && e.origin?.kind === 'composer') {
       const filled = lastFill
       background(() => learn($, filled, e.text))
@@ -500,6 +574,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'fa' }, async ($, e) => {
     const [sub = '', arg] = e.args.trim().split(/\s+/)
+    const rest = e.args.trim().slice(sub.length).trim() // a chord has a space: "ctrl+x v"
     if (sub === '') {
       const wasListening = isActive
       if (wasListening) isStopping = true
@@ -519,6 +594,8 @@ export const register: Register = on => {
       const p = await savePrefs($, { autoSend: !(await loadPrefs($)).autoSend })
       return { text: p.autoSend ? '⏎ Auto-send on: the prompt is sent when you finish' : '⏎ Auto-send off: press Enter to send' }
     }
+    if (sub === 'key') return { text: await keyCommand($, rest) }
+    if (sub === 'space') return { text: await spaceCommand($, rest) }
     if (sub === 'mic') return { text: await micCommand($, arg) }
     if (sub === 'terms') return { text: await termsCommand($) }
     return { text: sub === 'help' ? HELP : `Unknown: /fa ${sub}\n\n${HELP}` }
@@ -533,10 +610,16 @@ export const register: Register = on => {
       const isVoiceOn = (settings.voice as { enabled?: boolean } | undefined)?.enabled === true
       return (
         <Box flexDirection="column">
-          {isVoiceOn && <Text color={AMBER}>⚠ Built-in /voice is on and takes Space: run /voice off (once) to use Persian hold-space.</Text>}
+          {isVoiceOn && p.holdSpace && (
+            <Text color={AMBER}>⚠ Built-in /voice is on and takes Space: run /voice off (once) to use Persian hold-space.</Text>
+          )}
           <Box gap={1}>
-            <Text color={RED}>🎙</Text>
-            <Text dimColor>Hold space to talk</Text>
+            {p.holdSpace && <Text color={RED}>🎙</Text>}
+            {p.holdSpace && <Text dimColor>Hold space to talk</Text>}
+            {/* With a shortcut, its chord presses this Button from the prompt (the Button must be drawn). */}
+            {(p.shortcut || !p.holdSpace) && (
+              <Button key="talk" label={p.shortcut ? `🎙 Talk (${p.shortcut})` : '🎙 Talk'} action={ACTION} onPress={() => press($)} />
+            )}
             <Button key="mode" label={`✨ ${MODES[p.mode].label}`} onPress={() => setMode($)} />
             <Button key="send" label={p.autoSend ? '⏎ Auto-send' : '⏎ Manual send'} onPress={() => savePrefs($, { autoSend: !p.autoSend })} />
             {u && <Button key="undo" label="↩ Use plain translation" onPress={() => usePlain($)} />}
@@ -555,7 +638,15 @@ export const register: Register = on => {
           ? `${spin} Finishing translation…`
           : `${spin} Polishing · ${MODES[p.mode].label}…`
     const meter = levels.map(v => BARS[Math.round(Math.min(1, v) * 8)]).join('').padStart(16, ' ')
-    const hint = phase !== 'rec' ? '' : isHeld ? 'release space to finish' : '/fa to finish'
+    const byKey = !isSpaceHold // started by the shortcut, the button or /fa
+    const hint =
+      phase !== 'rec'
+        ? ''
+        : !byKey
+          ? 'release space to finish'
+          : isHeld
+            ? `release ${p.shortcut ?? 'the key'} to finish`
+            : `${p.shortcut ? `${p.shortcut} or ` : ''}/fa to finish`
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
         <Box gap={2}>
@@ -565,9 +656,10 @@ export const register: Register = on => {
         </Box>
         <Text bold wrap="truncate-start">{l.fa || 'Listening…'}</Text>
         <Text dimColor wrap="truncate-start">→ {l.en || '…'}</Text>
-        {phase === 'rec' && !isHeld && (
+        {/* Drawn while the shortcut is held too: its repeats reach press() through this Button. */}
+        {phase === 'rec' && byKey && (
           <Box>
-            <Button key="stop" label="⏹ Stop" onPress={() => press($)} />
+            <Button key="stop" label={p.shortcut ? `⏹ Stop (${p.shortcut})` : '⏹ Stop'} action={ACTION} onPress={() => press($)} />
           </Box>
         )}
       </Box>
