@@ -1,0 +1,11 @@
+{
+  "name": "persian-voice",
+  "version": "1.0.0",
+  "description": "Hold Space to speak Persian (or English); a live English translation goes into the Claude Code prompt box",
+  "author": { "name": "Ariiima", "url": "https://github.com/Ariiima" },
+  "homepage": "https://github.com/Ariiima/claude-code-persian-voice",
+  "repository": "https://github.com/Ariiima/claude-code-persian-voice",
+  "license": "MIT",
+  "keywords": ["voice", "dictation", "persian", "farsi", "speech-to-text", "translation"],
+  "types": "./types/index.d.ts"
+}
