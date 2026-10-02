@@ -96,7 +96,28 @@ When you release the key, the plugin can rewrite the text into a clear prompt wi
 4. Read the text, change it if necessary, and press <kbd>Enter</kbd>.
 
 A single tap of <kbd>Space</kbd> still types a space.
-To record without holding a key, run `/fa`. Then run `/fa` again, or press **⏹ Stop**, to finish.
+To record without holding a key, run `/fa rec`. Then run `/fa rec` again, or press **⏹ Stop**, to finish.
+
+### Settings
+
+Type `/fa` (or click **⚙ Settings** above the prompt) to open the settings dialog. It shows every setting and its current value, and you change them in place:
+
+```
+How to start a recording
+Hold Space         [ ● On  ]  hold Space to talk, release to finish
+Shortcut           type one, e.g. ctrl+x v, then Enter
+
+What happens to your words
+Cleanup mode       Prompt ▾
+                   Claude rewrites what you said into a clear prompt…
+Auto-send          [ ○ Off ]  goes into the prompt box; you press Enter
+
+Microphone and words
+Microphone         System default ▾
+Word list          12 words, 1 translation, 4 learned · ~/.config/persian-voice/terms.txt
+```
+
+Use <kbd>Tab</kbd> to move, <kbd>Enter</kbd> to change, and <kbd>Esc</kbd> to close. Changes are saved at once, for all projects.
 
 ### Choose how to start a recording
 
@@ -127,7 +148,8 @@ The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the f
 
 | Command | What it does |
 | --- | --- |
-| `/fa` | Start or stop a recording without holding a key. |
+| `/fa` | Open the [settings](#settings) dialog. |
+| `/fa rec` | Start or stop a recording without holding a key. |
 | `/fa key [shortcut]` | Show or set your own shortcut, for example `/fa key ctrl+x v`. `/fa key off` removes it. |
 | `/fa space [on\|off]` | Turn hold-Space to talk on or off. |
 | `/fa mode [name]` | Show or set the cleanup mode. Without a name, it moves to the next mode. |
@@ -137,19 +159,33 @@ The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the f
 | `/fa terms` | Show your word list and the words the plugin learned. |
 | `/fa help` | Show all commands. |
 
-You can also click the **✨ mode** and **⏎ send** buttons above the prompt.
+You can also click the **✨ mode**, **⏎ send** and **⚙ Settings** buttons above the prompt.
 
 With auto-send on, Claude Code shows the prompt as "The persian-voice plugin sent a message". Claude Code adds this label to every prompt that a plugin sends, and a plugin cannot remove it. Claude still treats the text as your request.
 
 ### Modes
 
-| Mode | Result | Uses a model |
+The mode sets what happens to your words after you stop speaking.
+
+| Mode | Shown as | Result | Uses a model |
+| --- | --- | --- | --- |
+| `prompt` (default) | Prompt | A clear prompt: the goal first, then the details you gave. | Only for long or self-corrected requests |
+| `chat` | Prompt (reads this chat) | Like `prompt`, but Claude also reads this conversation (see below). Slower. | Yes (the session's model) |
+| `spec` | Spec | A task spec with Goal, Context, Requirements and Done when. Good for thinking aloud. | Yes |
+| `commit` | Commit msg | A git commit message. | Yes |
+| `exact` | Exact | The translation only, with fillers removed. | No |
+
+#### What "Prompt (reads this chat)" does
+
+When you speak, you often refer to things from the conversation: "fix that bug", "undo the change in the file we edited".
+The normal `prompt` mode sees only your words, so these references stay vague.
+The `chat` mode also gives Claude the conversation so far. Claude uses it only to replace a vague reference with the real name. It does not add new requests.
+
+| You say | `prompt` gives | `chat` gives |
 | --- | --- | --- |
-| `prompt` (default) | A clear prompt: the goal first, then the details you gave. | Only for long or self-corrected requests |
-| `chat` | Like `prompt`, and uses the conversation to make "that bug" or "the file we changed" exact. Slower. | Yes (the session's model) |
-| `spec` | A task spec with Goal, Context, Requirements and Done when. Good for thinking aloud. | Yes |
-| `commit` | A git commit message. | Yes |
-| `exact` | The translation only, with fillers removed. | No |
+| "um, fix that bug from before" | Fix that bug from before. | Fix the null check in `parseOrder` in `auth.ts`. |
+
+Use `chat` when you talk about earlier work. It is slower, because Claude reads the whole conversation. If it takes more than 8 seconds, the plugin uses the normal `prompt` mode instead.
 
 The rewrite uses Claude Sonnet 5.5 at low effort, through your Claude Code login.
 If the rewrite takes more than 8 seconds or fails, the plain translation is used.
@@ -192,9 +228,9 @@ useEffect
 
 The plugin also adds the project name, the git branch and the project's file names by itself.
 
-### Settings
+### Where settings are saved
 
-Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in Claude Code's plugin store. They apply to all projects and sessions.
+Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in Claude Code's plugin store. They apply to all projects and sessions. To change them, use the [settings dialog](#settings).
 
 ### Environment variables
 
@@ -210,7 +246,7 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 
 ## Privacy
 
-- **Audio** goes to Soniox for recognition and translation. Recording runs only while you hold <kbd>Space</kbd>, or between two `/fa` commands. It stops by itself after 5 minutes.
+- **Audio** goes to Soniox for recognition and translation. Recording runs only while you hold <kbd>Space</kbd>, or between two presses of your shortcut or `/fa rec`. It stops by itself after 5 minutes.
 - **Text** goes to Anthropic only when the rewrite runs. It uses your own Claude Code login.
 - **Your API key** stays in `~/.config/soniox/key` or in your environment. It is never written to this folder.
 

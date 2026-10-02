@@ -176,6 +176,57 @@ test('the shortcut button: press to start, press again to stop', async ($, on) =
   expect(t.out.box).toBe('Run the tests')
 })
 
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`/fa opens the settings dialog on ${surface}; its controls change the settings`, async ($, on) => {
+    setup($, on, { said: { fa: '', en: '' } })
+    let saved: Record<string, unknown> = {}
+    on('store.set', async (_$, e) => {
+      saved = e.value as Record<string, unknown>
+      return { value: undefined }
+    })
+    on('process.run', async () => ({
+      value: {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'AVFoundation audio devices:\n[x] [1] MacBook Pro Microphone\n',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }))
+    let opened = ''
+    on('ui.open', async (_$, e) => {
+      opened = e.id
+      return { value: { isPlaced: true } }
+    })
+    expect((await fa($, '')).text).toContain('settings')
+    expect(opened).toBe('fa-settings')
+    const ui = await $.ui.mount({
+      plugin: 'persian-voice',
+      surface,
+      component: 'Pane',
+      requestId: 'fa-settings',
+      props: { title: 'Persian Voice · settings', isFocused: true, bodyColumns: 100, placement: 'inline' } as never,
+    })
+    expect(await ui.find({ text: /reads this chat|Claude rewrites/ })).toBeDefined()
+    await ui.select({ key: 'mode', value: 'chat' })
+    expect(saved.mode).toBe('chat')
+    expect(await ui.find({ text: /also reads this conversation/ })).toBeDefined() // the mode's explanation
+    await ui.press({ key: 'space' })
+    expect(saved.holdSpace).toBe(false)
+    await ui.select({ key: 'mic', value: '1' })
+    expect(saved.mic).toBe('1')
+  })
+}
+
+test('/fa rec starts and stops a recording without holding a key', async ($, on) => {
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' } })
+  expect((await fa($, 'rec')).text).toContain('Listening')
+  await t.clock.advance(2000)
+  expect((await fa($, 'rec')).text).toContain('Stopping')
+  await t.release()
+  expect(t.out.box).toBe('Run the tests')
+})
+
 test('auto-send: the text is sent, not left in the box', async ($, on) => {
   const t = setup($, on, { said: { fa: '...', en: 'run the tests' }, prefs: { mode: 'prompt', autoSend: true, mic: '1' } })
   await t.hold()

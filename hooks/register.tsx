@@ -40,24 +40,29 @@ const undo = atom({ plugin: 'persian-voice', key: 'undo' } as const, null as Und
 
 // ---------- Polish: rules first (instant), a model only when the text needs judgement ----------
 
-const MODES: Record<Mode, { label: string; task: string }> = {
+// label: the button and the dialog; about: one line for the person; task: the model's instruction.
+const MODES: Record<Mode, { label: string; about: string; task: string }> = {
   prompt: {
     label: 'Prompt',
+    about: 'Claude rewrites what you said into a clear prompt: the goal first, then your details. Short, clear requests skip this and stay as they are.',
     task: 'Rewrite it as a clean prompt. Start with the goal as one direct sentence. Then give the context, constraints and expected result the speaker gave, as short sentences or a short list. A question stays a question. A short, clear request stays short and almost unchanged.',
   },
   chat: {
-    label: 'Prompt + chat',
+    label: 'Prompt (reads this chat)',
+    about: 'Like Prompt, but Claude also reads this conversation, so "fix that bug" becomes "fix the null check in parseOrder". Slower.',
     task: 'Rewrite it as a clean prompt, as in Prompt mode. Use the conversation so far ONLY to make vague references exact ("that bug", "the file we changed" -> the real name).',
   },
   spec: {
     label: 'Spec',
+    about: 'For thinking aloud: Claude turns it into a task spec with Goal, Context, Requirements and Done when.',
     task: 'The speaker thinks aloud. Organize it as a task spec with these headings, each only when the speaker gave content for it: "Goal" (one sentence), "Context", "Requirements" (bullets), "Done when" (bullets).',
   },
   commit: {
     label: 'Commit msg',
+    about: 'Claude turns what you said into a git commit message.',
     task: 'Write it as a git commit message: an imperative subject line of at most 72 characters; then, only when the speaker gave details, a blank line and a short body.',
   },
-  exact: { label: 'Exact', task: '' },
+  exact: { label: 'Exact', about: 'Only the translation, with fillers like "um" removed. No AI rewrite.', task: '' },
 }
 const MODE_ORDER: Mode[] = ['prompt', 'chat', 'spec', 'commit', 'exact']
 
@@ -188,9 +193,9 @@ async function keyCommand($: EngineInterface, arg: string) {
 
 async function spaceCommand($: EngineInterface, arg: string) {
   const cur = await loadPrefs($)
-  const on = arg === 'on' ? true : arg === 'off' ? false : !cur.holdSpace
-  const p = await savePrefs($, { holdSpace: on })
-  const other = p.shortcut ? `Use ${p.shortcut} or /fa.` : 'Set a shortcut with /fa key ctrl+x v, or use /fa.'
+  const isOn = arg === 'on' ? true : arg === 'off' ? false : !cur.holdSpace
+  const p = await savePrefs($, { holdSpace: isOn })
+  const other = p.shortcut ? `Use ${p.shortcut} or /fa rec.` : 'Set a shortcut with /fa key ctrl+x v, or use /fa rec.'
   return p.holdSpace ? '␣ Hold Space to talk: on' : `␣ Hold Space to talk: off. Space only types now. ${other}`
 }
 
@@ -466,23 +471,33 @@ async function usePlain($: EngineInterface) {
 
 const HELP = `Persian voice
   hold space    talk, release to finish
-  /fa           start / stop without holding
+  /fa           settings: see and change everything below
+  /fa rec       start / stop a recording without holding a key
   /fa key [k]   your own shortcut, e.g. /fa key ctrl+x v (press to start, again to stop); /fa key off
   /fa space     hold Space to talk on / off (off: Space only types)
-  /fa mode [m]  cleanup: prompt · chat (uses the conversation) · spec · commit · exact
+  /fa mode [m]  cleanup: ${MODE_ORDER.join(' · ')}
   /fa polish    cleanup on / off (prompt <-> exact)
   /fa send      auto-send on / off
   /fa mic [n]   list / choose the microphone
   /fa terms     your word list for recognition (one per line, or "persian = english")
+Modes:
+${MODE_ORDER.map(m => `  ${m.padEnd(8)} ${MODES[m].about}`).join('\n')}
 Tip: speak in short, complete sentences. Agents follow spoken-formal input better than casual speech.`
+
+// The microphones ffmpeg sees, as [index, name].
+async function listMics($: EngineInterface) {
+  const r = await $.process
+    .run(['ffmpeg', '-hide_banner', '-f', 'avfoundation', '-list_devices', 'true', '-i', ''], {
+      env: { PATH, HOME: (await paths($)).home },
+    })
+    .catch(() => ({ stderr: '' }))
+  const out = r.stderr.split('audio devices:')[1] ?? ''
+  return [...out.matchAll(/\[(\d+)\] (.+)/g)].map(m => [m[1] ?? '', (m[2] ?? '').trim()] as const)
+}
 
 async function micCommand($: EngineInterface, arg?: string) {
   if (arg) return `🎙 Microphone: ${(await savePrefs($, { mic: arg })).mic}`
-  const r = await $.process.run(['ffmpeg', '-hide_banner', '-f', 'avfoundation', '-list_devices', 'true', '-i', ''], {
-    env: { PATH, HOME: (await paths($)).home },
-  })
-  const out = r.stderr.split('audio devices:')[1] ?? ''
-  const mics = [...out.matchAll(/\[(\d+)\] (.+)/g)].map(m => [m[1], (m[2] ?? '').trim()])
+  const mics = await listMics($)
   const cur = (await loadPrefs($)).mic
   return mics.length
     ? `${mics.map(([n, name]) => `${n === cur ? '▶' : ' '} ${n}  ${name}`).join('\n')}\nChoose one: /fa mic <number>`
@@ -494,6 +509,26 @@ async function termsCommand($: EngineInterface) {
   return `Word list: ${(await paths($)).terms}\n  ${mine.words.length} words, ${mine.pairs.length} translations; ${learned.length} learned from your edits${
     learned.length ? `: ${learned.slice(0, 12).join(', ')}` : ''
   }\nThe project's file names, name and branch are added by themselves.`
+}
+
+// ---------- Settings dialog (/fa, or ⚙ in the band) ----------
+
+const SETTINGS = 'fa-settings'
+// Read once when the dialog opens: ffmpeg and the word file are too slow to read on every redraw.
+let micOptions: { value: string; label: string }[] = []
+let wordsInfo = ''
+
+async function openSettings($: EngineInterface) {
+  const [mics, mine, learned, p] = await Promise.all([listMics($), readTerms($), learnedTerms($), paths($)])
+  micOptions = [{ value: 'default', label: 'System default' }, ...mics.map(([n, name]) => ({ value: n, label: name }))]
+  wordsInfo = `${mine.words.length} words, ${mine.pairs.length} translations, ${learned.length} learned · ${p.terms.replace(p.home, '~')}`
+  await applyPrefs($, await loadPrefs($))
+  return $.ui.open({ id: SETTINGS, title: 'Persian Voice · settings', focus: true, closeOnEscape: true, rows: 22 })
+}
+
+async function shortcutFromDialog($: EngineInterface, value: string) {
+  const reply = await keyCommand($, value.trim())
+  $.ui.toast(reply.split('\n')[0] ?? reply)
 }
 
 // ---------- Drawing ----------
@@ -511,7 +546,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'fa',
-      description: 'Persian/English voice to the prompt box. /fa help for modes, auto-send, mic and words',
+      description: 'Persian voice: settings · /fa rec records without holding · /fa help lists all commands',
     })
     await applyPrefs($, await loadPrefs($))
     const { terms } = await paths($)
@@ -575,11 +610,15 @@ export const register: Register = on => {
   on('command.run', { command: 'fa' }, async ($, e) => {
     const [sub = '', arg] = e.args.trim().split(/\s+/)
     const rest = e.args.trim().slice(sub.length).trim() // a chord has a space: "ctrl+x v"
-    if (sub === '') {
+    if (sub === '' || sub === 'settings') {
+      const r = await openSettings($)
+      return { text: r.isPlaced ? '⚙ Persian Voice settings (Esc closes)' : HELP }
+    }
+    if (sub === 'rec') {
       const wasListening = isActive
       if (wasListening) isStopping = true
       else await press($)
-      return { text: wasListening ? 'Stopping…' : '🎙 Listening. Run /fa again to stop.' }
+      return { text: wasListening ? 'Stopping…' : '🎙 Listening. Run /fa rec again to stop.' }
     }
     if (sub === 'mode') {
       if (arg && !(arg in MODES)) return { text: `Unknown mode "${arg}". Modes: ${MODE_ORDER.join(', ')}` }
@@ -622,6 +661,7 @@ export const register: Register = on => {
             )}
             <Button key="mode" label={`✨ ${MODES[p.mode].label}`} onPress={() => setMode($)} />
             <Button key="send" label={p.autoSend ? '⏎ Auto-send' : '⏎ Manual send'} onPress={() => savePrefs($, { autoSend: !p.autoSend })} />
+            <Button key="settings" label="⚙ Settings" onPress={() => openSettings($)} />
             {u && <Button key="undo" label="↩ Use plain translation" onPress={() => usePlain($)} />}
           </Box>
         </Box>
@@ -646,7 +686,7 @@ export const register: Register = on => {
           ? 'release space to finish'
           : isHeld
             ? `release ${p.shortcut ?? 'the key'} to finish`
-            : `${p.shortcut ? `${p.shortcut} or ` : ''}/fa to finish`
+            : `${p.shortcut ? `${p.shortcut} or ` : ''}/fa rec to finish`
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
         <Box gap={2}>
@@ -662,6 +702,71 @@ export const register: Register = on => {
             <Button key="stop" label={p.shortcut ? `⏹ Stop (${p.shortcut})` : '⏹ Stop'} action={ACTION} onPress={() => press($)} />
           </Box>
         )}
+      </Box>
+    )
+  })
+
+  // The settings dialog: every setting, its current value, and a control to change it.
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
+    const p = await read($, prefs)
+    const els = $.ui.resolve(e)
+    if (!('Select' in els) || !('Input' in els)) {
+      const { Text } = els // a surface without pickers: show the commands instead
+      return <Text>{HELP}</Text>
+    }
+    const { Box, Button, Input, Select, Text } = els
+    const LABEL = 18
+    const onOff = (isOn: boolean) => (isOn ? '● On ' : '○ Off')
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color={ORANGE}>How to start a recording</Text>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Hold Space</Text></Box>
+          <Button key="space" label={onOff(p.holdSpace)} onPress={() => savePrefs($, { holdSpace: !p.holdSpace })} />
+          <Text dimColor>{p.holdSpace ? 'hold Space to talk, release to finish' : 'Space only types'}</Text>
+        </Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Shortcut</Text></Box>
+          {p.shortcut && <Text bold>{p.shortcut}</Text>}
+          {p.shortcut && <Button key="unbind" label="Remove" onPress={() => shortcutFromDialog($, 'off')} />}
+          {!p.shortcut && <Input key="shortcut" placeholder="type one, e.g. ctrl+x v, then Enter" onSubmit={v => shortcutFromDialog($, v)} />}
+        </Box>
+        <Box paddingLeft={LABEL + 1}>
+          <Text dimColor>Press the shortcut to start, and again to stop.</Text>
+        </Box>
+
+        <Box marginTop={1}><Text bold color={ORANGE}>What happens to your words</Text></Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Cleanup mode</Text></Box>
+          <Select
+            key="mode"
+            options={MODE_ORDER.map(m => ({ value: m, label: MODES[m].label }))}
+            value={p.mode}
+            onSelect={v => setMode($, v as Mode)}
+          />
+        </Box>
+        <Box paddingLeft={LABEL + 1}>
+          <Text dimColor wrap="wrap">{MODES[p.mode].about}</Text>
+        </Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Auto-send</Text></Box>
+          <Button key="send" label={onOff(p.autoSend)} onPress={() => savePrefs($, { autoSend: !p.autoSend })} />
+          <Text dimColor>{p.autoSend ? 'sent as soon as you finish' : 'goes into the prompt box; you press Enter'}</Text>
+        </Box>
+
+        <Box marginTop={1}><Text bold color={ORANGE}>Microphone and words</Text></Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Microphone</Text></Box>
+          <Select key="mic" options={micOptions} value={p.mic} onSelect={v => savePrefs($, { mic: v })} />
+        </Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Word list</Text></Box>
+          <Text dimColor wrap="wrap">{wordsInfo}</Text>
+        </Box>
+
+        <Box marginTop={1}>
+          <Text dimColor>Tab moves · Enter changes · Esc closes · saved for all projects · /fa help lists commands</Text>
+        </Box>
       </Box>
     )
   })
