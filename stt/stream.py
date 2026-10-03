@@ -8,7 +8,7 @@ lags the spoken text), one last line with "done": true is printed, and the proce
 Key: $SONIOX_API_KEY or ~/.config/soniox/key. Mic: $FA_MIC (avfoundation index or "default").
 $FA_CONTEXT: Soniox `context` JSON (project terms). $FA_INPUT: an audio file instead of the mic (tests).
 """
-import array, asyncio, json, math, os, sys
+import array, asyncio, atexit, json, math, os, signal, sys
 
 import websockets
 
@@ -42,6 +42,7 @@ async def main():
     ff = await asyncio.create_subprocess_exec(
         "ffmpeg", "-loglevel", "error", *src, "-ac", "1", "-ar", str(RATE), "-f", "s16le", "-",
         stdout=asyncio.subprocess.PIPE)
+    atexit.register(lambda: ff.returncode is None and ff.kill())  # never leave ffmpeg holding the mic
     final = {"fa": "", "en": ""}   # confirmed text, never changes
     live = {"fa": "", "en": ""}    # provisional tail, replaced on every message
     lvl = [0.0]
@@ -54,7 +55,9 @@ async def main():
     if os.environ.get("FA_CONTEXT"):
         config["context"] = json.loads(os.environ["FA_CONTEXT"])
 
-    async with websockets.connect(URL) as ws:
+    # proxy=None: websockets 15+ reads the macOS system proxy; a local SOCKS proxy then resets or breaks the stream.
+    # ponytail: set FA_PROXY=1 to use the system proxy again
+    async with websockets.connect(URL, proxy=True if os.environ.get("FA_PROXY") else None) as ws:
         await ws.send(json.dumps(config))
 
         async def send():
@@ -99,6 +102,7 @@ async def main():
         print(json.dumps({**snap(), "done": True}, ensure_ascii=False), flush=True)
 
 
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # the plugin kills us with SIGTERM: still run the cleanup below
 try:
     asyncio.run(main())
 except KeyboardInterrupt:

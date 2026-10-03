@@ -3,10 +3,13 @@
 Hold <kbd>Space</kbd>, speak Persian (or English, or both), and release.
 A clean English prompt appears in the Claude Code prompt box.
 
-Persian Voice is a [Claude Code](https://claude.com/claude-code) plugin.
+> **This is a mod, not a plugin.** It is a [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview): code that runs inside Claude Code and hooks into its events and interface. A plain plugin cannot catch the Space key or draw the live view.
+
+Persian Voice is a [Claude Code](https://claude.com/claude-code) mod.
 It streams your microphone to [Soniox](https://soniox.com) for live speech recognition and translation.
+The prompt arrives in English, so the model understands it better and gives a better answer than it does for Persian alone.
 While you speak, you see your words and their English translation above the prompt.
-When you release the key, the plugin can rewrite the text into a clear prompt with Claude.
+When you release the key, you can improve the text: Claude rewrites it into a clear prompt. This is optional, and you choose how (see [Modes](#modes)).
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
@@ -43,7 +46,7 @@ When you release the key, the plugin can rewrite the text into a clear prompt wi
 1. Clone the repository:
 
    ```sh
-   git clone https://github.com/Ariiima/claude-code-persian-voice.git ~/.claude/persian-voice
+   git clone https://github.com/Ariiima/claude-code-persian-to-english-voice.git ~/.claude/persian-voice
    cd ~/.claude/persian-voice
    ```
 

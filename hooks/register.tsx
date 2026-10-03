@@ -306,7 +306,14 @@ function begin($: EngineInterface, held: boolean, tentative = false) {
   lastPress = 0 // start() sets the clock times
   levels = []
   latest = { fa: '', en: '' }
-  background(() => start($))
+  // A throw before start()'s own cleanup would leave isActive set for good (Space swallowed, no new recording).
+  background(() =>
+    start($).catch(async e => {
+      isActive = isTentative = isPolishing = isFinishing = false
+      $.ui.toast(`Voice error: ${String(e).slice(0, 120)}`)
+      await update($, live, () => null)
+    }),
+  )
 }
 
 // The talk / Stop button, its shortcut, and `/fa`: press to start, press again to stop.
@@ -353,30 +360,35 @@ async function start($: EngineInterface) {
   // Polls for cancel / Stop / release on its own, so it works even while stream.py prints nothing.
   background(async () => {
     let stopAt: number | null = null
-    while (isRunning) {
-      await $.clock.sleep(100)
-      const now = await $.clock.now()
-      if (isCancelled || (isTentative && now - lastPress > HOLD_GAP_MS)) {
-        isCancelled = true // start() then drops the text
-        await $.fs.write(STOP, '') // stream.py exits by itself...
-        await $.clock.sleep(FINISH_MS)
-        if (isRunning) await proc.return({ code: null, signal: null }) // ...or is killed
-        return
+    try {
+      while (isRunning) {
+        await $.clock.sleep(100)
+        const now = await $.clock.now()
+        if (isCancelled || (isTentative && now - lastPress > HOLD_GAP_MS)) {
+          isCancelled = true // start() then drops the text
+          await $.fs.write(STOP, '') // stream.py exits by itself...
+          await $.clock.sleep(FINISH_MS)
+          if (isRunning) await proc.return({ code: null, signal: null }) // ...or is killed
+          return
+        }
+        if (stopAt === null && now - startedAt > MAX_MS) {
+          isStopping = true
+          $.ui.toast('🎙 Stopped after 5 minutes')
+        }
+        if (stopAt === null && (isStopping || (isHeld && now - lastPress > RELEASE_MS))) {
+          stopAt = now
+          isFinishing = true
+          await redraw($)
+          await $.fs.write(STOP, '') // stream.py closes the mic, waits for the last words, then exits
+        }
+        if (stopAt !== null && now - stopAt > FINISH_MS) {
+          await proc.return({ code: null, signal: null }) // kills stream.py
+          return
+        }
       }
-      if (stopAt === null && now - startedAt > MAX_MS) {
-        isStopping = true
-        $.ui.toast('🎙 Stopped after 5 minutes')
-      }
-      if (stopAt === null && (isStopping || (isHeld && now - lastPress > RELEASE_MS))) {
-        stopAt = now
-        isFinishing = true
-        await redraw($)
-        await $.fs.write(STOP, '') // stream.py closes the mic, waits for the last words, then exits
-      }
-      if (stopAt !== null && now - stopAt > FINISH_MS) {
-        await proc.return({ code: null, signal: null }) // kills stream.py
-        return
-      }
+    } catch {
+      // If this poller dies, nothing else would ever stop stream.py: kill it so start() can finish.
+      if (isRunning) await proc.return({ code: null, signal: null }).catch(() => {})
     }
   })
   try {
@@ -445,7 +457,7 @@ async function put($: EngineInterface, text: string, autoSend: boolean) {
   if (autoSend) {
     await $.prompt.fill({ text: '', mode: 'replace' })
     lastFill = null
-    // The prompt.submit hook below drops the "a plugin sent this" label from it.
+    // ponytail: the engine marks this submit as sent by the plugin (PromptSubmitArgs has no `origin`); a plugin cannot remove that label
     background(() => $.prompt.submit({ text: before + piece + box.text.slice(box.cursor) }))
     return
   }
