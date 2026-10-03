@@ -1,19 +1,31 @@
 """Runs the rewrite prompts in hooks/prompts.ts through Claude, one dictation per kind, and checks each output.
 
-Run: python3 tools/rewrite_eval.py   (uses your Claude Code login through `claude -p`, and the JEV key)
-Checks: JEV's "after" questions (nothing added, changed or dropped), plus a rule for each case.
+Run: python3 tools/rewrite_eval.py [low|medium|high]   (effort, default low; uses your Claude Code login
+through `claude -p`, and the JEV key)
+Checks: JEV's "after" questions (nothing added, changed or dropped), plus a rule for each case. Like the
+plugin, a rewrite that fails the JEV check gets one retry that is told the problems.
 """
-import subprocess
+import json, statistics, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
 from jev_eval import Q, T, ask, load_ts
 
 PROMPTS = load_ts("prompts.ts", "PROMPTS")
 MODEL = "claude-sonnet-5-5"  # same as POLISH_MODEL in hooks/register.tsx
+EFFORT = sys.argv[1] if len(sys.argv) > 1 else "low"
 
 
 def system_prompt(kind):  # same string as systemPrompt() in hooks/register.tsx
     return "\n".join(PROMPTS["rules"]) + f"\n\n<task>\n{PROMPTS['kinds'][kind]}\n</task>"
+
+
+def user_prompt(fa, en, previous=None, problems=()):  # same string as userPrompt() in hooks/register.tsx
+    text = f"<spoken>\n{fa}\n</spoken>\n<draft>\n{en}\n</draft>"
+    if previous is None:
+        return text + "\nRewrite the draft now."
+    r = PROMPTS["retry"]
+    items = "\n".join(f"- {r[p]}" for p in problems)
+    return f"{text}\n<previous_rewrite>\n{previous}\n</previous_rewrite>\n{r['ask']}\n{items}\n{r['end']}"
 
 
 def no_preamble(out):
@@ -51,8 +63,8 @@ CASES = [
      lambda o: "Goal" in o and "offline" in o.lower() and "maybe" in o.lower()),  # "maybe as markdown" stays an option
     ("commit", "یه پیام کامیت بنویس که می‌گه جلوی گم شدن متن دیکته رو گرفتیم و برای هر نوع کار یه پرامپت جدا گذاشتیم",
      "write a commit message that says we prevented the loss of the dictation text and put a separate prompt for each kind of work",
-     # a body that repeats the subject is allowed (Claude adds one about half the time); the subject rules are not optional
-     lambda o: len(o.splitlines()[0]) <= 72 and not o.splitlines()[0].endswith(".") and "commit message" not in o.lower()),
+     # the speaker gave no reason beyond the subject, so the task's examples ask for the subject alone
+     lambda o: len(o.splitlines()) == 1 and len(o) <= 72 and not o.endswith(".") and "commit message" not in o.lower()),
     # the draft misses the end of the speech: the port comes from <spoken>
     ("general", "پکیج‌ها رو نصب کن، سرور توسعه رو روی پورت ۳۰۰۱ اجرا کن",
      "Install the packages, run the development server on port",
@@ -60,28 +72,42 @@ CASES = [
 ]
 
 
-def rewrite(kind, fa, en):
-    prompt = f"<spoken>\n{fa}\n</spoken>\n<draft>\n{en}\n</draft>\nRewrite the draft now."
-    r = subprocess.run(["claude", "-p", "--model", MODEL, "--effort", "low", "--tools", "", "--no-session-persistence",
-                        "--system-prompt", system_prompt(kind)], input=prompt, capture_output=True, text=True, timeout=120)
-    return r.stdout.strip()
+def rewrite(kind, prompt):
+    """One rewrite; returns its text and the API time in ms (the CLI's own start-up is not counted)."""
+    r = subprocess.run(["claude", "-p", "--model", MODEL, "--effort", EFFORT, "--tools", "", "--no-session-persistence",
+                        "--output-format", "json", "--system-prompt", system_prompt(kind)],
+                       input=prompt, capture_output=True, text=True, timeout=180)
+    out = json.loads(r.stdout)
+    return out["result"].strip(), out.get("duration_api_ms", 0)
+
+
+def problems_of(fa, en, out):
+    a, _ = ask({"recent_chat": [], "spoken": fa, "draft": en, "rewritten": out}, Q["after"])
+    return a, [k for k, v in a.items() if v >= T]
 
 
 def run(case):
     kind, fa, en, check = case
-    out = rewrite(kind, fa, en)
-    a, _ = ask({"recent_chat": [], "spoken": fa, "draft": en, "rewritten": out}, Q["after"])
-    return out, a, check(out) and no_preamble(out), all(v < T for v in a.values())
+    out, ms = rewrite(kind, user_prompt(fa, en))
+    a, problems = problems_of(fa, en, out)
+    retried = bool(problems)
+    if problems:  # the plugin's one retry, told what was wrong
+        out, ms2 = rewrite(kind, user_prompt(fa, en, out, problems))
+        ms += ms2
+        a, problems = problems_of(fa, en, out)
+    return out, a, check(out) and no_preamble(out), not problems, retried, ms
 
 
 if __name__ == "__main__":
     with ThreadPoolExecutor(4) as ex:
         results = list(ex.map(run, CASES))
     good = 0
-    for (kind, _, en, _), (out, a, rule_ok, jev_ok) in zip(CASES, results):
+    for (kind, _, en, _), (out, a, rule_ok, jev_ok, retried, ms) in zip(CASES, results):
         good += rule_ok and jev_ok
         flags = "ok " if rule_ok and jev_ok else f"BAD{'' if rule_ok else ' rule'}{'' if jev_ok else ' jev'}"
-        print(f"== {flags} [{kind}] {en[:70]}")
+        print(f"== {flags} [{kind}] {ms / 1000:.1f}s{' (retried)' if retried else ''} {en[:60]}")
         print("   " + out.replace("\n", "\n   "))
         print(f"   JEV: { {k: round(v, 2) for k, v in a.items()} }\n")
-    print(f"{good}/{len(CASES)} rewrites pass")
+    times = [r[5] / 1000 for r in results]
+    print(f"effort {EFFORT}: {good}/{len(CASES)} rewrites pass, {sum(r[4] for r in results)} retried,"
+          f" API time median {statistics.median(times):.1f}s, max {max(times):.1f}s")

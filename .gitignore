@@ -6,6 +6,9 @@ __pycache__/
 # Type definitions that Claude Code writes when it loads the plugin
 .claude-plugin/types/
 
+# Results of tools/prompt_ablation.py (kept between runs so a broken run can continue)
+tools/*.results.jsonl
+
 # Editors and OS
 .DS_Store
 .vscode/

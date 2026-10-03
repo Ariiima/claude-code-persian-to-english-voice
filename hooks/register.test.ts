@@ -4,15 +4,19 @@ import type { Engine } from 'claude-code/testing'
 
 import { JEV_QUESTIONS } from './jev'
 import { PROMPTS } from './prompts'
-import { KIND_NAMES, needsModel, newTerms, parseJev, plan, preclean, rewriteChangedMeaning, systemPrompt } from './register'
+import { KIND_NAMES, needsModel, newTerms, parseJev, plan, preclean, rewriteProblems, systemPrompt, userPrompt } from './register'
 import type { Answers } from './register'
 
 type Said = { fa: string; en: string }
-type Jev = { before?: Answers; after?: Answers }
+// `after` as a list: one answer per "after" call, in order (the last one repeats).
+type Jev = { before?: Answers; after?: Answers | Answers[] }
 
 // "before" answers for a clean, safe request to the agent: every flaw low
 const CLEAN = { has_noise: 0.02, has_vague_reference: 0.03, chat_resolves_reference: 0.02, is_rambling: 0.03, mistranslated: 0.05, is_for_agent: 0.97, is_irreversible: 0.02, kind: 'general' }
 const FAITHFUL = { adds_request: 0.02, changes_fact: 0.05, drops_fact: 0.1 }
+
+// The i-th of a list (the last one past its end), or the value itself.
+const nth = <T,>(v: T | T[] | undefined, i: number) => (Array.isArray(v) ? v[Math.min(i, v.length - 1)] : v)
 
 // Mocks stream.py, the prompt box, the store and the model. `said` is what stream.py hears.
 // incomplete: stream.py ends without its final "done" line (killed before Soniox finished).
@@ -24,7 +28,7 @@ function setup(
     said: Said
     box?: string
     prefs?: object
-    reply?: string | null
+    reply?: string | null | string[] // a list: one reply per model call, in order (the last one repeats)
     files?: Record<string, string>
     jev?: Jev
     incomplete?: boolean
@@ -46,6 +50,7 @@ function setup(
     jevCalls: [] as string[],
     toasts: [] as string[],
     systems: [] as string[], // the system prompt of each model call
+    prompts: [] as string[], // the user message of each model call
     store: {} as Record<string, unknown>,
   }
   if (opts.jev) {
@@ -56,7 +61,7 @@ function setup(
       const set = 'rewritten' in (body.state ?? {}) ? 'after' : 'before'
       out.jevCalls.push(set)
       const answers = Object.fromEntries(
-        Object.entries(jev[set] ?? {}).map(([k, v]) => [k, typeof v === 'string' ? { type: 'choice', choice: v } : { type: 'noul', noul: v }]),
+        Object.entries(nth(jev[set], out.jevCalls.filter(s => s === set).length - 1) ?? {}).map(([k, v]) => [k, typeof v === 'string' ? { type: 'choice', choice: v } : { type: 'noul', noul: v }]),
       )
       const stdout = e.argv[0] === 'sh' ? JSON.stringify({ answers }) : ''
       return { value: { exitCode: stdout ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -96,10 +101,11 @@ function setup(
   on('model.complete', async (_$, e) => {
     out.modelCalls++
     out.systems.push(e.system ?? '')
+    out.prompts.push(e.prompt ?? '')
     await opts.modelGate
     return opts.reply === null
       ? { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: {} as never } }
-      : { value: { isAnswered: true as const, text: opts.reply ?? 'POLISHED', usage: {} as never } }
+      : { value: { isAnswered: true as const, text: nth(opts.reply, out.modelCalls - 1) ?? 'POLISHED', usage: {} as never } }
   })
   on('process.spawn', async function* () {
     out.spawned++
@@ -192,11 +198,16 @@ test('prompts: every kind has a rewrite prompt and a JEV option, and nothing els
 
 test('JEV: a rewrite that adds, changes or drops something is not used', () => {
   const fine = { adds_request: 0.05, changes_fact: 0.1, drops_fact: 0.2 }
-  expect(rewriteChangedMeaning(fine)).toBe(false)
-  expect(rewriteChangedMeaning({ ...fine, adds_request: 0.95 })).toBe(true)
-  expect(rewriteChangedMeaning({ ...fine, changes_fact: 0.94 })).toBe(true)
-  expect(rewriteChangedMeaning({ ...fine, drops_fact: 0.96 })).toBe(true)
-  expect(rewriteChangedMeaning(null)).toBe(false) // no answer: keep the rewrite
+  expect(rewriteProblems(fine)).toEqual([])
+  expect(rewriteProblems({ ...fine, adds_request: 0.95 })).toEqual(['adds_request'])
+  expect(rewriteProblems({ ...fine, changes_fact: 0.94, drops_fact: 0.96 })).toEqual(['changes_fact', 'drops_fact'])
+  expect(rewriteProblems(null)).toEqual([]) // no answer: keep the rewrite
+  // the retry tells Claude its previous rewrite and each problem in it
+  const retry = userPrompt('سلام', 'hello', { previous: 'Hello and more.', problems: ['adds_request'] })
+  expect(retry).toContain('<previous_rewrite>\nHello and more.\n</previous_rewrite>')
+  expect(retry).toContain(`- ${PROMPTS.retry.adds_request}`)
+  expect(retry).not.toContain(PROMPTS.retry.drops_fact)
+  expect(userPrompt('سلام', 'hello')).toBe('<spoken>\nسلام\n</spoken>\n<draft>\nhello\n</draft>\nRewrite the draft now.')
 })
 
 test('learning: technical words added while editing the dictated text', () => {
@@ -537,9 +548,22 @@ test('JEV flow: a rewrite that changes the meaning is replaced by the plain text
   })
   await t.hold()
   await t.release()
-  expect(t.out.jevCalls).toEqual(['before', 'after'])
-  expect(t.out.modelCalls).toBe(1)
+  expect(t.out.jevCalls).toEqual(['before', 'after', 'after']) // the retry failed its check too
+  expect(t.out.modelCalls).toBe(2)
   expect(t.out.box).toBe('Fix the login test')
+})
+test('JEV flow: a rewrite that fails its check is retried once, told what was wrong', async ($, on) => {
+  const t = setup($, on, {
+    said: { fa: '...', en: 'um fix the login test' },
+    reply: ['Fix the login test and add tests for the logout flow.', 'Fix the login test.'],
+    jev: { before: { ...CLEAN, has_noise: 0.95 }, after: [{ adds_request: 0.97, changes_fact: 0.05, drops_fact: 0.05 }, FAITHFUL] },
+  })
+  await t.hold()
+  await t.release()
+  expect(t.out.modelCalls).toBe(2)
+  expect(t.out.prompts[1]).toContain('<previous_rewrite>\nFix the login test and add tests for the logout flow.\n</previous_rewrite>')
+  expect(t.out.prompts[1]).toContain(PROMPTS.retry.adds_request)
+  expect(t.out.box).toBe('Fix the login test.')
 })
 test('JEV flow: a faithful rewrite is used', async ($, on) => {
   const t = setup($, on, {

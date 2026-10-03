@@ -1,7 +1,8 @@
 // The rewrite prompts: shared rules, plus one task per kind of request. JEV's `kind` question (jev.ts)
 // picks the kind; register.tsx builds the system prompt with systemPrompt(). tools/rewrite_eval.py runs
 // this same object through Claude. Follows Anthropic's prompting guidance: a role, the reason behind
-// each rule, XML-tagged input, positive instructions, and examples.
+// each rule, XML-tagged input, and positive instructions. tools/prompt_ablation.py measured each part:
+// examples (shared and per kind) changed nothing, so there are none; the rules and the kind tasks did.
 export const PROMPTS = {
   rules: [
     "You turn a speaker's dictated words into a prompt for Claude Code, an AI coding agent. You are a rewriter, not an assistant: Claude Code acts on your output later, so you never answer, perform or comment on the request.",
@@ -17,25 +18,6 @@ export const PROMPTS = {
     '- Write in the speaker\'s own voice, as if they typed the prompt themselves.',
     '- Write plain English text: short, direct sentences. Use a list only for three or more parallel items. Use headings only when the task below asks for them.',
     '- Output only the rewritten text, starting with its first word.',
-    '',
-    'These examples show the general rules. The task below sets the final form.',
-    '<examples>',
-    '<example>',
-    '<spoken>اممم این تست لاگین فیل میشه، نه ببخشید، تست logout، توی tests/auth.test.ts، خطای TypeError میده</spoken>',
-    '<draft>um this login test fails, no sorry, the logout test, in tests/auth.test.ts, it gives a TypeError error</draft>',
-    '<output>Fix the failing logout test in tests/auth.test.ts. It fails with a TypeError.</output>',
-    '</example>',
-    '<example>',
-    '<spoken>تابع parseOrder چرا دو بار صدا زده میشه؟</spoken>',
-    '<draft>Why is the function parse order called twice?</draft>',
-    '<output>Why is parseOrder called twice?</output>',
-    '</example>',
-    '<example>',
-    '<spoken>یه دکمه‌ی خروجی CSV به صفحه‌ی گزارش‌ها اضافه کن، مثل دکمه‌ی PDF که الان هست، و تاریخ‌ها رو با فرمت ISO بنویس</spoken>',
-    '<draft>Add a CSV output button to the reports page, like the PDF button that exists now, and write the dates in</draft>',
-    '<output>Add a CSV export button to the reports page. Follow the existing PDF button, and write the dates in ISO format.</output>',
-    '</example>',
-    '</examples>',
   ],
   // Added for the chat fork, which sees the main conversation.
   chat: 'You also see the conversation so far. Use it only to make vague references exact ("that bug" or "the file we changed" becomes the real name). Add nothing else from the conversation.',
@@ -57,5 +39,14 @@ export const PROMPTS = {
     spec: 'The speaker thinks aloud about a larger task. Organize it as a task spec with these headings, each only when the speaker gave content for it: "Goal" (one sentence), "Context", "Requirements" (a list), "Out of scope" (a list), "Done when" (a list of checks).',
     commit:
       'Write a git commit message. The first line is the subject: imperative mood, at most 72 characters, no period at the end. Most dictated messages need only the subject. Add a blank line and a short body only when the speaker gave details that the subject does not already say, such as why the change was made. Leave out the speaker\'s words about the message itself, such as "write a commit message saying".',
+  },
+  // A second try when JEV finds that the first rewrite changed what the speaker said (Anthropic's
+  // self-correction pattern: draft, review, refine). One line per JEV `after` question that failed.
+  retry: {
+    adds_request: 'It added a request, step or condition that the speaker did not make. Remove it.',
+    changes_fact: 'It changed a name, number, file path or code term. Use the value from <spoken> or <draft>.',
+    drops_fact: 'It left out a fact, name, number, file path or request that <draft> contains. Put it back.',
+    ask: 'Your previous rewrite is in <previous_rewrite>. A check found these problems in it:',
+    end: 'Rewrite the draft again, and fix these problems. Change nothing else.',
   },
 }

@@ -245,7 +245,7 @@ When you set a JEV key, the plugin asks JEV these questions about each recording
 | Is the text a request for Claude? | When JEV is sure that it is not (for example, you talk to another person), the plugin puts the text in the prompt box, but does not rewrite it or send it. |
 | Does the request do something that you cannot undo (delete, force-push, deploy)? | With auto-send on, the plugin does not send the prompt. It puts the text in the prompt box. Press <kbd>Enter</kbd> to send it. |
 | Which kind of task is it? | It uses the rewrite prompt for that [kind](#prompt-kinds). |
-| After the rewrite: did Claude add, change or remove something that you said? | It uses your own words instead of the rewrite. |
+| After the rewrite: did Claude add, change or remove something that you said? | It asks Claude for one more rewrite and tells it the problem. If the second rewrite also has a problem, it uses your own words. |
 
 To turn on the checks, save your TypeSafe key:
 
@@ -259,7 +259,22 @@ You can also set the `JEV_API_KEY` environment variable.
 Without a key, or when JEV does not answer in 2.5 seconds, the plugin uses its old rules. You do not lose a recording.
 
 The questions are in `hooks/jev.ts`. To test a change to them on labelled examples, run `python3 tools/jev_eval.py`.
-To test a change to the rewrite prompts, run `python3 tools/rewrite_eval.py`. It runs one dictation of each kind through Claude and checks the results. Both scripts need Node 22 or later.
+To test a change to the rewrite prompts, run `python3 tools/rewrite_eval.py`. It runs one dictation of each kind through Claude, with the plugin's retry, and checks the results. To compare effort levels, add `low`, `medium` or `high`. The script shows the API time of each rewrite. Both scripts need Node 22 or later.
+
+Two more scripts measure whether a change to the prompts helps:
+
+| Script | What it does | Rewrites, cost at API prices |
+|---|---|---|
+| `tools/prompt_ab.py [git-ref] [repeats]` | Compares the prompts of a commit with the current prompts | 88 for 2 repeats, about $2 |
+| `tools/prompt_ablation.py [repeats] [blocks\|rules]` | Removes one part of the prompts at a time and measures the loss | `blocks`: 276 for 2 repeats, about $6. `rules`: 828, about $17 |
+
+Each rewrite costs about $0.02, because the `claude` CLI adds about 4,700 tokens of its own context to each call. With a Claude subscription, the calls count toward your plan's usage limit. Run the scripts with 1 repeat to halve the cost.
+
+The last ablation test (`blocks`, 2 repeats) showed:
+
+- **The rules block helps.** Without it, the plugin passed 48 of 84 rewrites instead of 80 of 84. Uncertain ideas became requirements, corrections were lost, and Claude sometimes answered the request.
+- **The task prompts for each kind help.** Without them, spec, commit and story rewrites failed (28 of 44 instead of 42 of 44).
+- **Examples did not help** (82 of 84 without them), so the prompts have none.
 
 ### Your words are never lost
 
@@ -362,6 +377,8 @@ hooks/jev.ts                 the JEV questions
 hooks/prompts.ts             the rewrite prompts, one for each kind of task
 tools/jev_eval.py            scores the JEV questions on labelled examples (live API)
 tools/rewrite_eval.py        runs the rewrite prompts through Claude and checks the results
+tools/prompt_ab.py           compares the prompts of a commit with the current prompts
+tools/prompt_ablation.py     removes one part of the prompts at a time and measures the loss
 types/index.d.ts             types of the plugin's shared state
 stt/stream.py                microphone → Soniox stream
 requirements.txt             Python dependency

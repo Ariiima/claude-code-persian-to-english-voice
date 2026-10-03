@@ -34,6 +34,9 @@ const MAX_MS = 5 * 60_000 // a forgotten tap-mode session stops by itself
 const UNDO_MS = 20_000 // how long "Use plain translation" stays
 const LAST = 'lastDictation' // store key: the last recording's words, for /fa last
 const POLISH_MODEL = 'claude-sonnet-5-5'
+// Picked with tools/rewrite_eval.py, 3 runs each: low and medium both passed 33/33, with API-time medians
+// of 2.1–2.7 s and 2.1–3.5 s. Same quality and speed, so low: it skips thinking on most short rewrites.
+const POLISH_EFFORT = 'low'
 const POLISH_MS = 8000 // slower than this: use the plain translation
 
 const live = atom({ plugin: 'persian-voice', key: 'live' } as const, null as Live | null)
@@ -161,9 +164,12 @@ export function plan(mode: Mode, raw: string, a: Answers | null, isComplete = tr
   return { aside, hold, kind: rewrite ? kind : null, useChat: rewrite && (mode === 'chat' || vague) }
 }
 
-/** The "after" answers: true when the rewrite added, changed or dropped something the speaker said. */
-export function rewriteChangedMeaning(a: Answers | null) {
-  return !!a && ['adds_request', 'changes_fact', 'drops_fact'].some(k => (a[k] as number) >= JEV_THRESHOLD)
+type RetryProblem = 'adds_request' | 'changes_fact' | 'drops_fact'
+
+/** The "after" answers: what the rewrite added, changed or dropped; none when JEV did not answer. */
+export function rewriteProblems(a: Answers | null): RetryProblem[] {
+  const keys: RetryProblem[] = ['adds_request', 'changes_fact', 'drops_fact']
+  return a ? keys.filter(k => (a[k] as number) >= JEV_THRESHOLD) : []
 }
 
 /** Asks one question set of jev.ts; null when JEV cannot answer in time. */
@@ -192,24 +198,36 @@ export function systemPrompt(kind: Kind) {
   return `${PROMPTS.rules.join('\n')}\n\n<task>\n${PROMPTS.kinds[kind]}\n</task>`
 }
 
-// Returns the polished text; the caller falls back to the plain text on a throw.
-async function polish($: EngineInterface, kind: Kind, useChat: boolean, fa: string, en: string) {
-  const system = systemPrompt(kind)
+/** A first rewrite that JEV found faults in, and those faults: the second try fixes them. */
+export type Retry = { previous: string; problems: RetryProblem[] }
+
+/** The rewrite's user message; tools/rewrite_eval.py builds the same string. */
+export function userPrompt(fa: string, en: string, retry?: Retry) {
   const input = `<spoken>\n${fa}\n</spoken>\n<draft>\n${en}\n</draft>`
+  if (!retry) return `${input}\nRewrite the draft now.`
+  const r = PROMPTS.retry
+  const list = retry.problems.map(p => `- ${r[p]}`).join('\n')
+  return `${input}\n<previous_rewrite>\n${retry.previous}\n</previous_rewrite>\n${r.ask}\n${list}\n${r.end}`
+}
+
+// Returns the polished text; the caller falls back to the plain text on a throw.
+async function polish($: EngineInterface, kind: Kind, useChat: boolean, fa: string, en: string, retry?: Retry) {
+  const system = systemPrompt(kind)
+  const prompt = userPrompt(fa, en, retry)
   if (useChat) {
     // The main thread's own transcript (prompt-cached), so "that bug" can be resolved.
     const r = await Promise.race([
-      $.model.fork({ prompt: `${system}\n\n${PROMPTS.chat}\n\n${input}\nRewrite the draft now.` }),
+      $.model.fork({ prompt: `${system}\n\n${PROMPTS.chat}\n\n${prompt}` }),
       $.clock.sleep(POLISH_MS).then(() => null),
     ])
     if (r?.isAnswered && r.text.trim()) return r.text.trim()
   }
   const r = await $.model.complete({
     model: POLISH_MODEL,
-    effort: 'low', // fast: a rewrite needs little thinking ($.model has no temperature knob)
+    effort: POLISH_EFFORT,
     system,
-    prompt: `${input}\nRewrite the draft now.`,
-    maxTokens: 1200,
+    prompt,
+    maxTokens: 2000, // room for a long spec, and for thinking, which counts toward this limit
     timeoutMs: POLISH_MS,
   })
   return r.isAnswered && r.text.trim() ? r.text.trim() : en
@@ -666,9 +684,15 @@ async function start($: EngineInterface) {
     let text = plain
     if (j.kind) {
       const kind = j.kind
+      const check = async (t: string) => rewriteProblems(await askJev($, 'after', { spoken: fa, draft: plain, rewritten: t }))
       text = await spinning($, KINDS[kind], async () => {
         const t = await polish($, kind, j.useChat, fa, plain).catch(() => plain)
-        if (t === plain || !rewriteChangedMeaning(await askJev($, 'after', { spoken: fa, draft: plain, rewritten: t }))) return t
+        const problems = t === plain ? [] : await check(t)
+        if (!problems.length) return t
+        // One more try, told what JEV found (costs time only when the first rewrite failed).
+        if (!isMine()) return plain
+        const t2 = await polish($, kind, j.useChat, fa, plain, { previous: t, problems }).catch(() => plain)
+        if (t2 !== plain && !(await check(t2)).length) return t2
         $.ui.toast('The rewrite changed what you said, so your own words are used')
         return plain
       })
