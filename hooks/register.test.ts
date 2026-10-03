@@ -2,20 +2,34 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { needsModel, newTerms, parseJev, plan, preclean, rewriteChangedMeaning } from './register'
+import { JEV_QUESTIONS } from './jev'
+import { PROMPTS } from './prompts'
+import { KIND_NAMES, needsModel, newTerms, parseJev, plan, preclean, rewriteChangedMeaning, systemPrompt } from './register'
 import type { Answers } from './register'
 
 type Said = { fa: string; en: string }
 type Jev = { before?: Answers; after?: Answers }
 
 // "before" answers for a clean, safe request to the agent: every flaw low
-const CLEAN = { has_noise: 0.02, has_vague_reference: 0.03, chat_resolves_reference: 0.02, is_rambling: 0.03, mistranslated: 0.05, is_for_agent: 0.97, is_irreversible: 0.02, mode: 'prompt' }
+const CLEAN = { has_noise: 0.02, has_vague_reference: 0.03, chat_resolves_reference: 0.02, is_rambling: 0.03, mistranslated: 0.05, is_for_agent: 0.97, is_irreversible: 0.02, kind: 'general' }
+const FAITHFUL = { adds_request: 0.02, changes_fact: 0.05, drops_fact: 0.1 }
 
 // Mocks stream.py, the prompt box, the store and the model. `said` is what stream.py hears.
+// incomplete: stream.py ends without its final "done" line (killed before Soniox finished).
+// submitDrop: a hook drops the auto-sent prompt.
 function setup(
   $: Engine,
   on: On,
-  opts: { said: Said; box?: string; prefs?: object; reply?: string | null; files?: Record<string, string>; jev?: Jev },
+  opts: {
+    said: Said
+    box?: string
+    prefs?: object
+    reply?: string | null
+    files?: Record<string, string>
+    jev?: Jev
+    incomplete?: boolean
+    submitDrop?: boolean
+  },
 ) {
   const clock = mock.clock(on)
   let stop = () => {}
@@ -29,12 +43,12 @@ function setup(
     files: { ...opts.files } as Record<string, string>,
     jevCalls: [] as string[],
     toasts: [] as string[],
+    systems: [] as string[], // the system prompt of each model call
+    store: {} as Record<string, unknown>,
   }
   if (opts.jev) {
-    // JEV over curl: answers each question set with opts.jev; jev.json lists only those questions
+    // JEV over curl: answers each question set with opts.jev (a set it leaves out gets no usable answer)
     const jev = opts.jev
-    const names = (a?: Answers) => Object.fromEntries(Object.keys(a ?? {}).map(k => [k, {}]))
-    out.files['/plugin/hooks/jev.json'] = JSON.stringify({ before: names(jev.before), after: names(jev.after) })
     on('process.run', async (_$, e) => {
       const body = JSON.parse(e.init?.stdin ?? '{}')
       const set = 'rewritten' in (body.state ?? {}) ? 'after' : 'before'
@@ -51,13 +65,14 @@ function setup(
     else out.files[e.path] = e.text
     return { value: undefined }
   })
-  on('fs.read', async (_$, e) => ({ value: out.files[e.path.replace(/^.*(?=\/hooks\/jev\.json$)/, '/plugin')] ?? '' }))
+  on('fs.read', async (_$, e) => ({ value: out.files[e.path] ?? '' }))
   on('prompt.read', async () => ({ value: { text: out.box, cursor: out.box.length } }))
   on('prompt.fill', async (_$, e) => {
     out.box = e.mode === 'insert' ? out.box + e.text : e.text
     return { isFilled: true }
   })
   on('prompt.submit', async (_$, e) => {
+    if (opts.submitDrop) return { drop: 'a hook dropped it' }
     out.submitted = e.text
     return { text: e.text, origin: e.origin }
   })
@@ -71,9 +86,14 @@ function setup(
   })
   on('env.get', async () => ({ value: '/home/test' }))
   on('settings.read', async () => ({ value: {} }))
-  on('store.get', async (_$, e) => ({ value: e.key === 'prefs' ? opts.prefs : undefined }))
-  on('model.complete', async () => {
+  on('store.get', async (_$, e) => ({ value: e.key === 'prefs' ? opts.prefs : out.store[e.key] }))
+  on('store.set', async (_$, e) => {
+    out.store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('model.complete', async (_$, e) => {
     out.modelCalls++
+    out.systems.push(e.system ?? '')
     return opts.reply === null
       ? { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: {} as never } }
       : { value: { isAnswered: true as const, text: opts.reply ?? 'POLISHED', usage: {} as never } }
@@ -83,7 +103,7 @@ function setup(
     try {
       yield { stream: 'stdout' as const, text: `${JSON.stringify({ fa: opts.said.fa, en: '', lvl: 0.7 })}\n` }
       await stopped
-      yield { stream: 'stdout' as const, text: `${JSON.stringify({ ...opts.said, done: true })}\n` }
+      yield { stream: 'stdout' as const, text: `${JSON.stringify({ ...opts.said, done: !opts.incomplete })}\n` }
       return { value: { code: 0, signal: null } }
     } finally {
       out.killed = true
@@ -130,22 +150,40 @@ test('JEV: reads nouls and choices; a missing or mistyped answer is no answer', 
 
 test('JEV: the plan from the answers', () => {
   const clean = CLEAN
-  expect(plan('prompt', 'Run the tests', clean)).toEqual({ drop: false, hold: false, mode: null })
-  expect(plan('prompt', 'x', { ...clean, has_noise: 0.95 })).toEqual({ drop: false, hold: false, mode: 'prompt' })
-  expect(plan('prompt', 'x', { ...clean, mistranslated: 0.97 }).mode).toBe('prompt')
-  expect(plan('prompt', 'x', { ...clean, chat_resolves_reference: 0.97 }).mode).toBe('chat') // "fix that bug": the chat fork names it
-  expect(plan('prompt', 'x', { ...clean, has_vague_reference: 0.9 }).mode).toBe('chat')
-  expect(plan('spec', 'x', clean).mode).toBe('spec') // spec and commit always reshape
-  expect(plan('exact', 'x', { ...clean, has_noise: 0.95 }).mode).toBe(null)
-  expect(plan('auto', 'x', { ...clean, mode: 'commit' }).mode).toBe('commit')
-  expect(plan('auto', 'x', clean).mode).toBe(null) // auto -> prompt, and the prompt is clean
-  expect(plan('prompt', 'x', { ...clean, is_for_agent: 0.1 }).drop).toBe(true)
-  expect(plan('prompt', 'x', { ...clean, is_for_agent: 0.3 }).drop).toBe(false) // only drop when JEV is sure
+  const noisy = { ...clean, has_noise: 0.95 }
+  expect(plan('prompt', 'Run the tests', clean)).toEqual({ aside: false, hold: false, kind: null, useChat: false })
+  expect(plan('prompt', 'x', noisy)).toEqual({ aside: false, hold: false, kind: 'general', useChat: false })
+  expect(plan('prompt', 'x', { ...noisy, kind: 'bug' }).kind).toBe('bug') // JEV picks the prompt
+  expect(plan('prompt', 'x', { ...clean, kind: 'bug' }).kind).toBe(null) // a clean bug report stays as it is
+  expect(plan('prompt', 'x', { ...clean, kind: 'story' }).kind).toBe('story') // the story editor always reshapes
+  expect(plan('prompt', 'x', { ...clean, mistranslated: 0.97 }).kind).toBe('general')
+  expect(plan('prompt', 'x', { ...clean, chat_resolves_reference: 0.97 }).useChat).toBe(true) // "fix that bug": the fork names it
+  expect(plan('prompt', 'x', { ...clean, has_vague_reference: 0.9 }).useChat).toBe(true)
+  expect(plan('chat', 'x', noisy).useChat).toBe(true)
+  expect(plan('spec', 'x', { ...clean, kind: 'bug' }).kind).toBe('spec') // spec and commit set by hand win
+  expect(plan('exact', 'x', noisy).kind).toBe(null)
+  expect(plan('auto', 'x', { ...clean, kind: 'commit' }).kind).toBe('commit')
+  expect(plan('prompt', 'x', { ...clean, kind: 'commit' }).kind).toBe(null) // Prompt leaves commit messages to the person
+  expect(plan('prompt', 'x', { ...noisy, kind: 'commit' }).kind).toBe('general')
+  expect(plan('prompt', 'x', { ...noisy, kind: 'nonsense' }).kind).toBe('general')
+  expect(plan('prompt', 'x', { ...noisy, is_for_agent: 0.1 })).toEqual({ aside: true, hold: false, kind: null, useChat: false })
+  expect(plan('prompt', 'x', { ...clean, is_for_agent: 0.3 }).aside).toBe(false) // aside only when JEV is sure
   expect(plan('prompt', 'x', { ...clean, is_irreversible: 0.35 }).hold).toBe(true)
+  expect(plan('prompt', 'x', clean, false).kind).toBe('general') // an incomplete translation: the rewrite reads the Persian
+  expect(plan('exact', 'x', clean, false).kind).toBe(null)
   // no answers (no key, slow, error): the old rules
-  expect(plan('prompt', 'Run the tests', null)).toEqual({ drop: false, hold: false, mode: null })
-  expect(plan('auto', 'fix the test, no sorry, the login test', null).mode).toBe('prompt')
-  expect(plan('commit', 'x', null).mode).toBe('commit')
+  expect(plan('prompt', 'Run the tests', null)).toEqual({ aside: false, hold: false, kind: null, useChat: false })
+  expect(plan('auto', 'fix the test, no sorry, the login test', null).kind).toBe('general')
+  expect(plan('commit', 'x', null).kind).toBe('commit')
+  expect(plan('chat', 'x', null)).toEqual({ aside: false, hold: false, kind: 'general', useChat: true })
+})
+
+test('prompts: every kind has a rewrite prompt and a JEV option, and nothing else', () => {
+  expect(Object.keys(PROMPTS.kinds).sort()).toEqual([...KIND_NAMES].sort())
+  expect(Object.keys(JEV_QUESTIONS.before.kind.criteria).sort()).toEqual([...KIND_NAMES].sort())
+  const bug = systemPrompt('bug')
+  expect(bug).toContain('You turn a speaker') // the shared rules
+  expect(bug).toContain(`<task>\n${PROMPTS.kinds.bug}\n</task>`)
 })
 
 test('JEV: a rewrite that adds, changes or drops something is not used', () => {
@@ -211,7 +249,6 @@ const fa = ($: Engine, args: string) =>
 test('/fa key writes the shortcut to keybindings.json and keeps the other bindings', async ($, on) => {
   const old = { bindings: [{ context: 'Chat', bindings: { 'ctrl+e': 'chat:externalEditor', f2: 'app:toggleDiffPreSession' } }] }
   const t = setup($, on, { said: { fa: '', en: '' }, files: { [KB]: JSON.stringify(old) } })
-  on('store.set', async () => ({ value: undefined }))
   expect((await fa($, 'key ctrl+x v')).text).toContain('ctrl+x v')
   const kb = JSON.parse(t.out.files[KB] ?? '{}')
   expect(kb.bindings[0].bindings).toEqual({ 'ctrl+e': 'chat:externalEditor' }) // the old binding of the action is gone
@@ -221,7 +258,6 @@ test('/fa key writes the shortcut to keybindings.json and keeps the other bindin
 
 test('/fa space off: holding Space only types', async ($, on) => {
   const t = setup($, on, { said: { fa: '', en: 'x' } })
-  on('store.set', async () => ({ value: undefined }))
   await fa($, 'space off')
   await t.hold()
   expect(t.out.spawned).toBe(0)
@@ -230,7 +266,6 @@ test('/fa space off: holding Space only types', async ($, on) => {
 
 test('the shortcut button: press to start, press again to stop', async ($, on) => {
   const t = setup($, on, { said: { fa: '...', en: 'run the tests' } })
-  on('store.set', async () => ({ value: undefined }))
   await fa($, 'key ctrl+x v')
   const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
   await ui.press({ key: 'talk' })
@@ -243,12 +278,8 @@ test('the shortcut button: press to start, press again to stop', async ($, on) =
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`/fa opens the settings dialog on ${surface}; its controls change the settings`, async ($, on) => {
-    setup($, on, { said: { fa: '', en: '' } })
-    let saved: Record<string, unknown> = {}
-    on('store.set', async (_$, e) => {
-      saved = e.value as Record<string, unknown>
-      return { value: undefined }
-    })
+    const t = setup($, on, { said: { fa: '', en: '' } })
+    const saved = () => t.out.store.prefs as Record<string, unknown>
     on('process.run', async () => ({
       value: {
         exitCode: 1,
@@ -274,12 +305,12 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     expect(await ui.find({ text: /reads this chat|Claude rewrites/ })).toBeDefined()
     await ui.select({ key: 'mode', value: 'chat' })
-    expect(saved.mode).toBe('chat')
-    expect(await ui.find({ text: /also reads this conversation/ })).toBeDefined() // the mode's explanation
+    expect(saved().mode).toBe('chat')
+    expect(await ui.find({ text: /always reads this conversation/ })).toBeDefined() // the mode's explanation
     await ui.press({ key: 'space' })
-    expect(saved.holdSpace).toBe(false)
+    expect(saved().holdSpace).toBe(false)
     await ui.select({ key: 'mic', value: '1' })
-    expect(saved.mic).toBe('1')
+    expect(saved().mic).toBe('1')
   })
 }
 
@@ -302,13 +333,80 @@ test('JEV flow: a clean long request skips the model that the old rule would cal
   expect(t.out.modelCalls).toBe(0)
   expect(t.out.box).toBe(preclean(en))
 })
-test('JEV flow: speech that is not for the agent is ignored', async ($, on) => {
-  const t = setup($, on, { said: { fa: '...', en: 'yes mom, I am coming to dinner now' }, jev: { before: { ...CLEAN, is_for_agent: 0.02 } } })
+test('JEV flow: speech that is not for the assistant stays in the box, not sent and not rewritten', async ($, on) => {
+  const t = setup($, on, {
+    said: { fa: '...', en: 'um yes mom, I am coming to dinner now' },
+    prefs: { mode: 'prompt', autoSend: true, mic: '1' },
+    jev: { before: { ...CLEAN, has_noise: 0.9, is_for_agent: 0.02 } },
+  })
   await t.hold()
   await t.release()
-  expect(t.out.box).toBe('')
+  expect(t.out.box).toBe('Yes mom, I am coming to dinner now')
+  expect(t.out.submitted).toBe('')
   expect(t.out.modelCalls).toBe(0)
-  expect(t.out.toasts.some(s => s.includes('Not a request'))).toBe(true)
+  expect(t.out.toasts.some(s => s.includes('does not look like a request'))).toBe(true)
+})
+test('lost text: a long recording whose translation did not finish gets Claude\'s translation', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'فصل سوم داستانم رو بخون', en: '' }, reply: 'Read the third chapter of my story.' })
+  await t.hold()
+  await t.release()
+  expect(t.out.box).toBe('Read the third chapter of my story.')
+  expect(t.out.store.lastDictation).toEqual({ fa: 'فصل سوم داستانم رو بخون', en: '' })
+})
+test('lost text: when that translation fails too, the Persian goes in the box', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'فصل سوم داستانم رو بخون', en: '' }, reply: null })
+  await t.hold()
+  await t.release()
+  expect(t.out.box).toBe('فصل سوم داستانم رو بخون')
+})
+test('lost text: a stream stopped before Soniox finished is rewritten from the Persian', async ($, on) => {
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' }, incomplete: true, reply: 'Run the tests and then build the app.' })
+  await t.hold()
+  await t.release()
+  expect(t.out.modelCalls).toBe(1) // the old rule would skip a short request
+  expect(t.out.box).toBe('Run the tests and then build the app.')
+})
+test('lost text: an auto-sent prompt that a hook drops comes back to the box', async ($, on) => {
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' }, prefs: { mode: 'prompt', autoSend: true, mic: '1' }, submitDrop: true })
+  await t.hold()
+  await t.release()
+  await t.clock.advance(10)
+  expect(t.out.box).toBe('Run the tests')
+  expect(t.out.toasts.some(s => s.includes('not sent'))).toBe(true)
+})
+test('lost text: /fa last shows the last recording and puts it back', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'تست‌ها رو اجرا کن', en: 'run the tests' } })
+  expect((await fa($, 'last')).text).toContain('No recording')
+  await t.hold()
+  await t.release()
+  t.out.box = '' // the person sent or cleared it
+  const r = await fa($, 'last')
+  await t.clock.advance(10)
+  expect(r.text).toContain('تست‌ها رو اجرا کن')
+  expect(r.text).toContain('run the tests')
+  expect(t.out.box).toBe('run the tests')
+})
+test('kinds: JEV picks the bug-fix prompt for the rewrite', async ($, on) => {
+  const t = setup($, on, {
+    said: { fa: '...', en: 'um the app crashes when the cart is empty' },
+    reply: 'Fix the crash when the cart is empty.',
+    jev: { before: { ...CLEAN, has_noise: 0.95, kind: 'bug' }, after: FAITHFUL },
+  })
+  await t.hold()
+  await t.release()
+  expect(t.out.systems[0]).toBe(systemPrompt('bug'))
+  expect(t.out.box).toBe('Fix the crash when the cart is empty.')
+})
+test('kinds: a clean story request still gets the story-editor prompt', async ($, on) => {
+  const t = setup($, on, {
+    said: { fa: '...', en: 'read chapter three and tell me where the pacing slows down' },
+    reply: 'Act as an experienced fiction editor. Read chapter three and find where the pacing slows down.',
+    jev: { before: { ...CLEAN, kind: 'story' }, after: FAITHFUL },
+  })
+  await t.hold()
+  await t.release()
+  expect(t.out.systems[0]).toBe(systemPrompt('story'))
+  expect(t.out.box).toContain('Act as an experienced fiction editor.')
 })
 test('JEV flow: a rewrite that changes the meaning is replaced by the plain text', async ($, on) => {
   const t = setup($, on, {
@@ -326,7 +424,7 @@ test('JEV flow: a faithful rewrite is used', async ($, on) => {
   const t = setup($, on, {
     said: { fa: '...', en: 'um fix the login test' },
     reply: 'Fix the login test.',
-    jev: { before: { ...CLEAN, has_noise: 0.95 }, after: { adds_request: 0.02, changes_fact: 0.05, drops_fact: 0.1 } },
+    jev: { before: { ...CLEAN, has_noise: 0.95 }, after: FAITHFUL },
   })
   await t.hold()
   await t.release()
@@ -344,16 +442,17 @@ test('JEV flow: with auto-send, a request that cannot be undone stays in the box
   expect(t.out.box).toBe('Drop the users table in production')
   expect(t.out.toasts.some(s => s.includes('Not sent'))).toBe(true)
 })
-test('JEV flow: Auto mode rewrites with the mode JEV picks', async ($, on) => {
+test('JEV flow: Auto mode rewrites with the kind JEV picks', async ($, on) => {
   const t = setup($, on, {
     said: { fa: '...', en: 'commit message fixed the null bug in parse order' },
     prefs: { mode: 'auto', autoSend: false, mic: '1' },
     reply: 'Fix null bug in parseOrder',
-    jev: { before: { ...CLEAN, mode: 'commit' }, after: { adds_request: 0.02, changes_fact: 0.05, drops_fact: 0.1 } },
+    jev: { before: { ...CLEAN, kind: 'commit' }, after: FAITHFUL },
   })
   await t.hold()
   await t.release()
   expect(t.out.modelCalls).toBe(1) // commit always reshapes, though the text has no flaw
+  expect(t.out.systems[0]).toBe(systemPrompt('commit'))
   expect(t.out.box).toBe('Fix null bug in parseOrder')
 })
 test('auto-send: the text is sent, not left in the box', async ($, on) => {

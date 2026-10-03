@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Live, Mode, Prefs, Undo } from '../types'
+import { JEV_QUESTIONS } from './jev'
+import { PROMPTS } from './prompts'
 
 const STOP = '/tmp/persian-voice.stop' // stream.py finishes cleanly when this file appears
 // ponytail: macOS paths for Homebrew's ffmpeg; the module has no Node/os access to look it up
@@ -30,6 +32,7 @@ const RELEASE_MS = 700 // no repeat for this long = released
 const FINISH_MS = 5000 // after Stop, wait this long at most for Soniox to finalize the translation
 const MAX_MS = 5 * 60_000 // a forgotten tap-mode session stops by itself
 const UNDO_MS = 20_000 // how long "Use plain translation" stays
+const LAST = 'lastDictation' // store key: the last recording's words, for /fa last
 const POLISH_MODEL = 'claude-sonnet-5-5'
 const POLISH_MS = 8000 // slower than this: use the plain translation
 
@@ -40,45 +43,44 @@ const undo = atom({ plugin: 'persian-voice', key: 'undo' } as const, null as Und
 
 // ---------- Polish: rules first (instant), a model only when the text needs judgement ----------
 
-// label: the button and the dialog; about: one line for the person; task: the model's instruction.
-const MODES: Record<Mode, { label: string; about: string; task: string }> = {
+// label: the button and the dialog; about: one line for the person.
+const MODES: Record<Mode, { label: string; about: string }> = {
   auto: {
     label: 'Auto',
-    about: 'JEV picks Prompt, Spec or Commit msg from what you said. Without a JEV key it works like Prompt.',
-    task: '', // plan() replaces auto with the mode JEV picks
+    about: 'Like Prompt, but JEV can also pick Spec or Commit msg from what you said. Without a JEV key it works like Prompt.',
   },
   prompt: {
     label: 'Prompt',
-    about: 'Claude rewrites what you said into a clear prompt: the goal first, then your details. Short, clear requests skip this and stay as they are.',
-    task: 'Rewrite it as a clean prompt. Start with the goal as one direct sentence. Then give the context, constraints and expected result the speaker gave, as short sentences or a short list. A question stays a question. A short, clear request stays short and almost unchanged.',
+    about: 'Claude rewrites what you said into a clear prompt, shaped for the task JEV detects (bug fix, feature, question, story …). Short, clear requests stay as they are.',
   },
   chat: {
     label: 'Prompt (reads this chat)',
-    about: 'Like Prompt, but Claude also reads this conversation, so "fix that bug" becomes "fix the null check in parseOrder". Slower.',
-    task: 'Rewrite it as a clean prompt, as in Prompt mode. Use the conversation so far ONLY to make vague references exact ("that bug", "the file we changed" -> the real name).',
+    about: 'Like Prompt, but Claude always reads this conversation, so "fix that bug" becomes "fix the null check in parseOrder". Slower.',
   },
-  spec: {
-    label: 'Spec',
-    about: 'For thinking aloud: Claude turns it into a task spec with Goal, Context, Requirements and Done when.',
-    task: 'The speaker thinks aloud. Organize it as a task spec with these headings, each only when the speaker gave content for it: "Goal" (one sentence), "Context", "Requirements" (bullets), "Done when" (bullets).',
-  },
-  commit: {
-    label: 'Commit msg',
-    about: 'Claude turns what you said into a git commit message.',
-    task: 'Write it as a git commit message: an imperative subject line of at most 72 characters; then, only when the speaker gave details, a blank line and a short body.',
-  },
-  exact: { label: 'Exact', about: 'Only the translation, with fillers like "um" removed. No AI rewrite.', task: '' },
+  spec: { label: 'Spec', about: 'For thinking aloud: Claude turns it into a task spec with Goal, Context, Requirements and Done when.' },
+  commit: { label: 'Commit msg', about: 'Claude turns what you said into a git commit message.' },
+  exact: { label: 'Exact', about: 'Only the translation, with fillers like "um" removed. No AI rewrite.' },
 }
 const MODE_ORDER: Mode[] = ['auto', 'prompt', 'chat', 'spec', 'commit', 'exact']
 
-const RULES = `You are a rewriter, not an assistant. Someone else (Claude Code, an AI coding agent) acts on your output later.
-Input: <spoken> holds the speaker's words (Persian, English or mixed), <draft> a rough English version.
-NEVER answer, perform, comment on or ask about the request. Output ONLY the rewritten English text: no preamble, no quotes, no code unless the speaker dictated code.
-Rules:
-- Keep the speaker's intent and every fact, name, file path, number and code token. Never add requirements, guesses or details they did not say.
-- Code identifiers, file names, commands and technical terms stay exactly as written, in English (Latin script).
-- Use the spoken words to fix translation errors.
-- Remove fillers, repetitions and false starts. When the speaker corrects themselves, keep only the correction.`
+// The rewrite prompts per task kind live in prompts.ts (tools/rewrite_eval.py runs that same object).
+// JEV's `kind` question (jev.ts) picks one; its options are these names.
+const KINDS = {
+  general: 'Prompt',
+  bug: 'Bug fix',
+  feature: 'Feature',
+  refactor: 'Refactor',
+  test: 'Tests',
+  review: 'Review',
+  question: 'Question',
+  story: 'Story editor',
+  spec: 'Spec',
+  commit: 'Commit msg',
+} as const
+export type Kind = keyof typeof KINDS
+export const KIND_NAMES = Object.keys(KINDS) as Kind[]
+// These reshape the text into another form, so they run even on a clean request.
+const ALWAYS_REWRITE: Kind[] = ['spec', 'commit', 'story']
 
 const FILLERS = /\b(?:u+m+|u+h+m*|e+r+m+|h+m+|a+h+)\b[,.]?\s*/gi
 const REPEATS = /\b(\w+)(?:\s+\1\b)+/gi
@@ -103,18 +105,17 @@ export function needsModel(mode: Mode, raw: string) {
 }
 
 // ---------- JEV (TypeSafe): fast typed judgments before and after the Claude rewrite ----------
-// The questions live in hooks/jev.json; tools/jev_eval.py scores that same file on labelled cases.
+// The questions live in jev.ts; tools/jev_eval.py scores that same object on labelled cases.
 // One proposition per question, and code combines the answers (TypeSafe's guidance).
 
 const JEV_URL = 'https://api.typesafe.ai/v1/systemone'
 const JEV_MS = 2500 // slower than this: carry on without JEV (most calls take ~1 s)
 const JEV_THRESHOLD = 0.5 // ponytail: JEV's yes/no midpoint; retune with tools/jev_eval.py
-const JEV_DROP_BELOW = 0.2 // is_for_agent: losing a real prompt costs more than keeping noise
+const JEV_ASIDE_BELOW = 0.2 // is_for_agent: below this the text stays in the box, not sent and not rewritten
 const JEV_HOLD_AT = 0.3 // is_irreversible: a missed one costs more than one extra Enter
 const JEV_CHAT = 4 // recent messages sent with the prompt (JEV's state limit is ~32k tokens)
 
-type JevSet = 'before' | 'after'
-let jevQuestions: Record<JevSet, Record<string, unknown>> | null = null
+type JevSet = keyof typeof JEV_QUESTIONS
 
 /** JEV's answer per question: a noul's probability or a choice's option. */
 export type Answers = Record<string, number | string>
@@ -136,19 +137,28 @@ export function parseJev(stdout: string, names: string[]): Answers | null {
   }
 }
 
-/** What happens to the dictated text. `mode`: the rewrite to run, or null for none. */
-export type Plan = { drop: boolean; hold: boolean; mode: Mode | null }
+/**
+ * What happens to the dictated text. Nothing here deletes it: `aside` (JEV: not for the assistant)
+ * and `hold` (cannot be undone) only keep it in the box unsent. `kind`: the rewrite prompt, or null for none.
+ */
+export type Plan = { aside: boolean; hold: boolean; kind: Kind | null; useChat: boolean }
 
-/** Turns the "before" answers into a plan; without them (no key, slow, error), the old rules. */
-export function plan(mode: Mode, raw: string, a: Answers | null): Plan {
-  const m: Mode = mode === 'auto' ? ((a?.mode as Mode | undefined) ?? 'prompt') : mode
-  if (!a) return { drop: false, hold: false, mode: needsModel(m, raw) ? m : null }
-  const yes = (k: string) => (a[k] as number) >= JEV_THRESHOLD
+/**
+ * Turns the "before" answers into a plan; without them (no key, slow, error), the old rules.
+ * `isComplete` is false when the stream stopped before Soniox finished: the draft may miss the end.
+ */
+export function plan(mode: Mode, raw: string, a: Answers | null, isComplete = true): Plan {
+  const aside = !!a && (a.is_for_agent as number) < JEV_ASIDE_BELOW
+  const hold = !!a && (a.is_irreversible as number) >= JEV_HOLD_AT
+  const picked: Kind = KIND_NAMES.includes(a?.kind as Kind) ? (a?.kind as Kind) : 'general'
+  // Spec and Commit msg set by hand win; Auto takes any kind; Prompt and Chat leave spec and commit to the person.
+  const kind: Kind = mode === 'spec' || mode === 'commit' ? mode : mode === 'auto' || (picked !== 'spec' && picked !== 'commit') ? picked : 'general'
+  const yes = (k: string) => !!a && (a[k] as number) >= JEV_THRESHOLD
   const vague = yes('has_vague_reference') || yes('chat_resolves_reference')
-  const flaw = vague || yes('has_noise') || yes('is_rambling') || yes('mistranslated')
-  // spec and commit always reshape; prompt/chat only fix a flaw, through the chat fork when a reference needs the transcript
-  const rewrite = m === 'exact' ? null : m === 'spec' || m === 'commit' ? m : !flaw ? null : vague ? 'chat' : m
-  return { drop: (a.is_for_agent as number) < JEV_DROP_BELOW, hold: (a.is_irreversible as number) >= JEV_HOLD_AT, mode: rewrite }
+  const flaw = a ? vague || yes('has_noise') || yes('is_rambling') || yes('mistranslated') : needsModel(mode === 'auto' ? 'prompt' : mode, raw)
+  const rewrite = mode !== 'exact' && !aside && (!isComplete || flaw || ALWAYS_REWRITE.includes(kind))
+  // the chat fork reads the whole transcript, so it can name what "that bug" means
+  return { aside, hold, kind: rewrite ? kind : null, useChat: rewrite && (mode === 'chat' || vague) }
 }
 
 /** The "after" answers: true when the rewrite added, changed or dropped something the speaker said. */
@@ -156,14 +166,12 @@ export function rewriteChangedMeaning(a: Answers | null) {
   return !!a && ['adds_request', 'changes_fact', 'drops_fact'].some(k => (a[k] as number) >= JEV_THRESHOLD)
 }
 
-/** Asks one question set of hooks/jev.json; null when JEV cannot answer in time. */
+/** Asks one question set of jev.ts; null when JEV cannot answer in time. */
 async function askJev($: EngineInterface, set: JevSet, state: Record<string, string>): Promise<Answers | null> {
   const { home } = await paths($)
   const key = ((await $.env.get('JEV_API_KEY').catch(() => undefined)) ?? (await $.fs.read(`${home}/.config/typesafe/key`).catch(() => ''))).trim()
   if (!key) return null
-  jevQuestions ??= await $.fs.read(`${$.plugin.root}/hooks/jev.json`).then(JSON.parse).catch(() => null)
-  const questions = jevQuestions?.[set]
-  if (!questions) return null
+  const questions = JEV_QUESTIONS[set]
   // State holds evidence only, as JSON; the instructions refer to its fields by backticked name.
   const recent_chat = (await $.session.messages().catch(() => []))
     .slice(-JEV_CHAT)
@@ -179,13 +187,19 @@ async function askJev($: EngineInterface, set: JevSet, state: Record<string, str
   return r && r.exitCode === 0 ? parseJev(r.stdout, Object.keys(questions)) : null
 }
 
+/** The rewrite's system prompt for one kind; tools/rewrite_eval.py builds the same string. */
+export function systemPrompt(kind: Kind) {
+  return `${PROMPTS.rules.join('\n')}\n\n<task>\n${PROMPTS.kinds[kind]}\n</task>`
+}
+
 // Returns the polished text; the caller falls back to the plain text on a throw.
-async function polish($: EngineInterface, mode: Mode, fa: string, en: string) {
+async function polish($: EngineInterface, kind: Kind, useChat: boolean, fa: string, en: string) {
+  const system = systemPrompt(kind)
   const input = `<spoken>\n${fa}\n</spoken>\n<draft>\n${en}\n</draft>`
-  if (mode === 'chat') {
+  if (useChat) {
     // The main thread's own transcript (prompt-cached), so "that bug" can be resolved.
     const r = await Promise.race([
-      $.model.fork({ prompt: `${RULES}\nTask: ${MODES.chat.task}\n\n${input}\nRewrite the draft now.` }),
+      $.model.fork({ prompt: `${system}\n\n${PROMPTS.chat}\n\n${input}\nRewrite the draft now.` }),
       $.clock.sleep(POLISH_MS).then(() => null),
     ])
     if (r?.isAnswered && r.text.trim()) return r.text.trim()
@@ -193,7 +207,7 @@ async function polish($: EngineInterface, mode: Mode, fa: string, en: string) {
   const r = await $.model.complete({
     model: POLISH_MODEL,
     effort: 'low', // fast: a rewrite needs little thinking ($.model has no temperature knob)
-    system: `${RULES}\nTask: ${MODES[mode === 'chat' ? 'prompt' : mode].task}`,
+    system,
     prompt: `${input}\nRewrite the draft now.`,
     maxTokens: 1200,
     timeoutMs: POLISH_MS,
@@ -367,6 +381,7 @@ let isCancelled = false
 let isStopping = false
 let isFinishing = false
 let isPolishing = false
+let polishLabel = '' // what the spinner says: the rewrite kind, or "Translating"
 let isHeld = false
 let lastPress = 0
 let lastSpace: number | null = null // time of the last space typed with nothing else between
@@ -425,6 +440,24 @@ async function repeat($: EngineInterface) {
 const background = (work: () => Promise<unknown>) => void work().catch(() => {})
 
 const redraw = ($: EngineInterface) => update($, live, l => l && { ...l })
+
+// Runs a model step with the spinner and its label in the REC panel.
+async function spinning<T>($: EngineInterface, label: string, work: () => Promise<T>): Promise<T> {
+  isPolishing = true
+  polishLabel = label
+  background(async () => {
+    while (isPolishing) {
+      await $.clock.sleep(120)
+      frame++
+      await redraw($)
+    }
+  })
+  try {
+    return await work()
+  } finally {
+    isPolishing = false
+  }
+}
 
 // Stream mic -> Soniox until Stop, clean up, then put the text in the prompt box (or send it).
 async function start($: EngineInterface) {
@@ -496,39 +529,42 @@ async function start($: EngineInterface) {
     isRunning = isFinishing = false
   }
   try {
-    if (isCancelled) return
+    const fa = last.fa.trim()
     const raw = last.en.trim()
-    if (!raw) {
+    // Only a tentative start is cancelled (one tap of Space, then typing): nothing was dictated, and saving
+    // its noise would overwrite the real last dictation.
+    if (isCancelled) return
+    // The safety copy comes before every other step, so none of them can lose what was said: /fa last shows it.
+    if (fa || raw) await $.store.set(LAST, { fa, en: raw }).catch(() => {})
+    if (!fa && !raw) {
       $.ui.toast(`Voice: ${err.trim().split('\n').pop() || 'nothing heard'}`)
       return
     }
     const p = await loadPrefs($)
-    const plain = preclean(raw)
-    const fa = last.fa.trim()
-    const j = plan(p.mode, raw, await askJev($, 'before', { spoken: fa, prompt: plain }))
-    if (j.drop) {
-      $.ui.toast(`🎙 Not a request, so it was ignored: "${plain.slice(0, 80)}"`)
+    if (!raw) {
+      // A long recording can end before Soniox translates it: Claude translates the Persian, else the Persian goes in.
+      $.ui.toast('🎙 The translation did not finish, so Claude translates your words. /fa last shows them.')
+      const t = await spinning($, 'Translating', () => polish($, 'general', false, fa, '')).catch(() => '')
+      await put($, t || fa, false)
       return
     }
+    const plain = preclean(raw)
+    const isComplete = last.done === true
+    const j = plan(p.mode, raw, await askJev($, 'before', { spoken: fa, prompt: plain }), isComplete)
+    if (j.aside) $.ui.toast('🎙 This does not look like a request for Claude, so it was not sent or rewritten.')
+    else if (!isComplete && !j.kind) $.ui.toast('🎙 The translation may miss your last words. /fa last shows what you said.')
     let text = plain
-    if (j.mode) {
-      isPolishing = true
-      background(async () => {
-        while (isPolishing) { // spinner
-          await $.clock.sleep(120)
-          frame++
-          await redraw($)
-        }
-      })
-      text = await polish($, j.mode, fa, plain).catch(() => plain)
-      if (text !== plain && rewriteChangedMeaning(await askJev($, 'after', { spoken: fa, draft: plain, rewritten: text }))) {
+    if (j.kind) {
+      const kind = j.kind
+      text = await spinning($, KINDS[kind], async () => {
+        const t = await polish($, kind, j.useChat, fa, plain).catch(() => plain)
+        if (t === plain || !rewriteChangedMeaning(await askJev($, 'after', { spoken: fa, draft: plain, rewritten: t }))) return t
         $.ui.toast('The rewrite changed what you said, so your own words are used')
-        text = plain
-      }
-      isPolishing = false
+        return plain
+      })
     }
-    const send = p.autoSend && !j.hold
-    if (p.autoSend && j.hold) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
+    const send = p.autoSend && !j.hold && !j.aside
+    if (p.autoSend && j.hold && !j.aside) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
     await put($, text, send)
     if (text !== plain && !send) {
       await update($, undo, () => ({ raw: plain, polished: text }))
@@ -549,10 +585,17 @@ async function put($: EngineInterface, text: string, autoSend: boolean) {
   const before = box.text.slice(0, box.cursor)
   const piece = (before && !/\s$/.test(before) ? ' ' : '') + text
   if (autoSend) {
+    const full = before + piece + box.text.slice(box.cursor)
     await $.prompt.fill({ text: '', mode: 'replace' })
     lastFill = null
     // ponytail: the engine marks this submit as sent by the plugin (PromptSubmitArgs has no `origin`); a plugin cannot remove that label
-    background(() => $.prompt.submit({ text: before + piece + box.text.slice(box.cursor) }))
+    background(async () => {
+      const r = await $.prompt.submit({ text: full }).catch(() => null)
+      if (r && r.drop === undefined) return
+      // Not sent (a hook dropped it, or the submit failed): the text goes back in the box, not lost.
+      await $.prompt.fill({ text: full, mode: 'insert' })
+      $.ui.toast('The prompt was not sent, so it is back in the prompt box')
+    })
     return
   }
   // fill, not submit: Enter sends it as the person's own prompt
@@ -579,6 +622,7 @@ const HELP = `Persian voice
   hold space    talk, release to finish
   /fa           settings: see and change everything below
   /fa rec       start / stop a recording without holding a key
+  /fa last      show your last recording again and put it in the prompt box
   /fa key [k]   your own shortcut, e.g. /fa key ctrl+x v (press to start, again to stop); /fa key off
   /fa space     hold Space to talk on / off (off: Space only types)
   /fa mode [m]  cleanup: ${MODE_ORDER.join(' · ')}
@@ -739,6 +783,13 @@ export const register: Register = on => {
       const p = await savePrefs($, { autoSend: !(await loadPrefs($)).autoSend })
       return { text: p.autoSend ? '⏎ Auto-send on: the prompt is sent when you finish' : '⏎ Auto-send off: press Enter to send' }
     }
+    if (sub === 'last') {
+      const d = (await $.store.get(LAST).catch(() => undefined)) as { fa?: string; en?: string } | undefined
+      if (!d?.fa && !d?.en) return { text: 'No recording saved yet.' }
+      // The command's own reply always shows the words; the box gets the English (or the Persian) to send.
+      background(() => $.prompt.fill({ text: d.en || d.fa || '', mode: 'insert' }))
+      return { text: `↩ Your last recording (also put in the prompt box):\n\n${d.fa ?? ''}\n\n→ ${d.en || '(no translation)'}` }
+    }
     if (sub === 'key') return { text: await keyCommand($, rest) }
     if (sub === 'space') return { text: await spaceCommand($, rest) }
     if (sub === 'mic') return { text: await micCommand($, arg) }
@@ -782,7 +833,7 @@ export const register: Register = on => {
         ? `${frame % 6 < 3 ? '●' : '○'} REC ${clockText(l.ms)}`
         : phase === 'finish'
           ? `${spin} Finishing translation…`
-          : `${spin} Polishing · ${MODES[p.mode].label}…`
+          : `${spin} Polishing · ${polishLabel}…`
     const meter = levels.map(v => BARS[Math.round(Math.min(1, v) * 8)]).join('').padStart(16, ' ')
     const byKey = !isSpaceHold // started by the shortcut, the button or /fa
     const hint =

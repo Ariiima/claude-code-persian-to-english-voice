@@ -153,6 +153,7 @@ The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the f
 | --- | --- |
 | `/fa` | Open the [settings](#settings) dialog. |
 | `/fa rec` | Start or stop a recording without holding a key. |
+| `/fa last` | Show your last recording (Persian and English) and put it in the prompt box again. |
 | `/fa key [shortcut]` | Show or set your own shortcut, for example `/fa key ctrl+x v`. `/fa key off` removes it. |
 | `/fa space [on\|off]` | Turn hold-Space to talk on or off. |
 | `/fa mode [name]` | Show or set the cleanup mode. Without a name, it moves to the next mode. |
@@ -172,8 +173,8 @@ The mode sets what happens to your words after you stop speaking.
 
 | Mode | Shown as | Result | Uses a model |
 | --- | --- | --- | --- |
-| `auto` | Auto | JEV selects `prompt`, `spec` or `commit` from what you said (see [JEV checks](#jev-checks-optional)). Without a JEV key, it works like `prompt`. | As the selected mode |
-| `prompt` (default) | Prompt | A clear prompt: the goal first, then the details you gave. | Only when JEV finds a problem. Without JEV: only for long or self-corrected requests |
+| `auto` | Auto | Like `prompt`, but JEV can also select a spec or a commit message (see [Prompt kinds](#prompt-kinds)). Without a JEV key, it works like `prompt`. | As the selected kind |
+| `prompt` (default) | Prompt | A clear prompt in the form of the task that JEV detects: bug fix, feature, question, story analysis, and others (see [Prompt kinds](#prompt-kinds)). | Only when JEV finds a problem, and always for a story analysis. Without JEV: only for long or self-corrected requests |
 | `chat` | Prompt (reads this chat) | Like `prompt`, but Claude also reads this conversation (see below). Slower. | Yes (the session's model) |
 | `spec` | Spec | A task spec with Goal, Context, Requirements and Done when. Good for thinking aloud. | Yes |
 | `commit` | Commit msg | A git commit message. | Yes |
@@ -195,6 +196,27 @@ The rewrite uses Claude Sonnet 5.5 at low effort, through your Claude Code login
 If the rewrite takes more than 8 seconds or fails, the plain translation is used.
 The rewrite never adds requirements that you did not say.
 
+#### Prompt kinds
+
+Each type of task needs different information. For example, a bug fix needs the symptom, the location and what "fixed" looks like.
+So the rewrite uses a different prompt for each type of task. With a JEV key, JEV selects the prompt for each recording. Without a key, the rewrite uses the general prompt.
+
+| Kind | What the rewrite gives |
+| --- | --- |
+| General | The goal first, then the context, constraints and expected result. |
+| Bug fix | The goal ("Fix …"), the symptom with the exact error message, when it occurs, where to look, and what "fixed" looks like. |
+| Feature | The goal, where it goes and which pattern to follow, the requirements, the constraints, and how to check it. |
+| Refactor | The goal, the scope, what must stay the same, and the target structure. |
+| Tests | The code under test, the cases and edge cases, the constraints, and how to run the tests. |
+| Review | What to review, what to look for, and the form of the report. |
+| Question | Your question, which stays a question, with the exact code and sources it is about. |
+| Story editor | The role "Act as an experienced fiction editor.", then the text, the aspects to analyze, and what to return. |
+| Spec | A task spec with Goal, Context, Requirements, Out of scope and Done when. |
+| Commit msg | A git commit message: an imperative subject of at most 72 characters. |
+
+Each prompt includes only the parts that you said. The only addition is the role sentence of the story editor.
+The prompts follow [Anthropic's prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the [Claude Code best practices](https://code.claude.com/docs/en/best-practices). They are in `hooks/prompts.ts`.
+
 ### JEV checks (optional)
 
 [JEV](https://docs.typesafe.ai) is a fast decision model from TypeSafe. It does not write text. It answers yes/no and choice questions with probabilities, in about 1 second.
@@ -204,9 +226,9 @@ When you set a JEV key, the plugin asks JEV these questions about each recording
 | --- | --- |
 | Does the text have fillers, a vague reference, rambling, or a translation error? | It runs the Claude rewrite only when the answer is yes. A clear request goes into the prompt box at once. |
 | Does the recent chat make a vague reference clear ("fix that bug")? | It rewrites in the `chat` mode, so Claude replaces the reference with the real name. |
-| Is the text a request for the coding agent? | When JEV is sure that it is not (for example, you talk to another person), the plugin ignores the text and shows it in a message. |
+| Is the text a request for Claude? | When JEV is sure that it is not (for example, you talk to another person), the plugin puts the text in the prompt box, but does not rewrite it or send it. |
 | Does the request do something that you cannot undo (delete, force-push, deploy)? | With auto-send on, the plugin does not send the prompt. It puts the text in the prompt box. Press <kbd>Enter</kbd> to send it. |
-| Which mode fits? (`auto` mode only) | It uses `prompt`, `spec` or `commit`. |
+| Which kind of task is it? | It uses the rewrite prompt for that [kind](#prompt-kinds). |
 | After the rewrite: did Claude add, change or remove something that you said? | It uses your own words instead of the rewrite. |
 
 To turn on the checks, save your TypeSafe key:
@@ -220,7 +242,17 @@ chmod 600 ~/.config/typesafe/key
 You can also set the `JEV_API_KEY` environment variable.
 Without a key, or when JEV does not answer in 2.5 seconds, the plugin uses its old rules. You do not lose a recording.
 
-The questions are in `hooks/jev.json`. To test a change to them on labelled examples, run `python3 tools/jev_eval.py`.
+The questions are in `hooks/jev.ts`. To test a change to them on labelled examples, run `python3 tools/jev_eval.py`.
+To test a change to the rewrite prompts, run `python3 tools/rewrite_eval.py`. It runs one dictation of each kind through Claude and checks the results. Both scripts need Node 22 or later.
+
+### Your words are never lost
+
+The plugin keeps every recording:
+
+- It saves each recording before any other step. Run `/fa last` to see it again and to put it back in the prompt box.
+- A long recording can end before Soniox finishes the translation. Then Claude translates your Persian words. If that fails, the Persian text goes into the prompt box.
+- If the translation can miss your last words, the rewrite uses your Persian words to complete it.
+- If an auto-sent prompt is not sent, it goes back into the prompt box.
 
 ## How it works
 
@@ -296,7 +328,9 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the plugin folder. |
 | The cursor moves back and forth while you hold <kbd>Space</kbd> | This is a known limitation of hold-Space. Claude Code draws each key before a plugin can remove it. It occurs only while you record. To avoid it, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
 | The shortcut does nothing | Run `/fa key` to see it. Check that no other binding in `~/.claude/keybindings.json` uses the same keys. |
-| "Not a request, so it was ignored" | JEV decided that you did not talk to Claude. The message shows the text. Say the request again, or remove the JEV key to turn off the checks. |
+| "This does not look like a request for Claude" | JEV decided that you did not talk to Claude. Your text is in the prompt box. Press <kbd>Enter</kbd> to send it, or delete it. |
+| "The translation did not finish" | The recording was long, and Soniox did not finish in time. Claude translated your words instead. Run `/fa last` to see the Persian text. |
+| You cannot find what you said | Run `/fa last`. |
 | "Not sent: this asks for something that cannot be undone" | JEV found a risky request while auto-send is on. Check the text in the prompt box, then press <kbd>Enter</kbd>. |
 
 ## Development
@@ -306,8 +340,10 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 hooks/hooks.json             loads the hooks module
 hooks/register.tsx           the plugin: hold detection, live view, cleanup, commands
 hooks/register.test.ts       tests
-hooks/jev.json               the JEV questions
+hooks/jev.ts                 the JEV questions
+hooks/prompts.ts             the rewrite prompts, one for each kind of task
 tools/jev_eval.py            scores the JEV questions on labelled examples (live API)
+tools/rewrite_eval.py        runs the rewrite prompts through Claude and checks the results
 types/index.d.ts             types of the plugin's shared state
 stt/stream.py                microphone → Soniox stream
 requirements.txt             Python dependency
