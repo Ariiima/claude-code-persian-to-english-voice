@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { needsModel, newTerms, preclean } from './register'
+import { needsModel, newTerms, parseJev, preclean } from './register'
 
 type Said = { fa: string; en: string }
 
@@ -90,6 +90,17 @@ test('rules: fillers and stutters go, short requests skip the model', () => {
   expect(needsModel('prompt', 'fix the test, no sorry, the login test')).toBe(true)
   expect(needsModel('spec', 'Run the tests')).toBe(true)
   expect(needsModel('exact', 'a long request with many many words in it here')).toBe(false)
+})
+
+test('JEV: any flaw means rewrite; a missing answer is no answer', () => {
+  const ans = (noise: unknown, vague: unknown, ramble: unknown) =>
+    JSON.stringify({ answers: { has_noise: { noul: noise }, has_vague_reference: { noul: vague }, is_rambling: { noul: ramble } } })
+  expect(parseJev(ans(0.02, 0.94, 0.06))).toBe(true)
+  expect(parseJev(ans(0.02, 0.03, 0.03))).toBe(false)
+  expect(parseJev(ans(0.02, 'x', 0.03))).toBe(null)
+  expect(parseJev(JSON.stringify({ answers: { has_noise: { noul: 0.9 } } }))).toBe(null)
+  expect(parseJev('{"error":"bad key"}')).toBe(null)
+  expect(parseJev('not json')).toBe(null)
 })
 
 test('learning: technical words added while editing the dictated text', () => {

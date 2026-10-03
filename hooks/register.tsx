@@ -97,6 +97,72 @@ export function needsModel(mode: Mode, raw: string) {
   return raw.split(/\s+/).length > 8 || CORRECTIONS.test(raw)
 }
 
+// ---------- JEV gate: a fast yes/no model decides if the rewrite is needed at all ----------
+
+const JEV_URL = 'https://api.typesafe.ai/v1/systemone'
+const JEV_MS = 2500 // slower than this: use the rule in needsModel (most calls take ~1 s)
+const JEV_THRESHOLD = 0.5 // ponytail: JEV's own yes/no midpoint; tune with real prompts
+const JEV_CHAT = 4 // recent messages sent with the prompt (JEV's state limit is ~32k tokens)
+// One proposition per question, high = a flaw; code ORs them (TypeSafe's Noul guidance).
+// Question names never reach the model: the instructions and criteria carry the meaning.
+// Checked on 12 labelled prompts + 5 chat cases: 17/17 (one big question scored 7/12).
+const JEV_QUESTIONS = {
+  has_noise: {
+    type: 'noul',
+    instructions: 'Does `prompt` contain spoken-language noise: filler words, repeated words, false starts, or a self-correction where the speaker changes what they said?',
+    criteria: {
+      true: 'At least one filler (um, like, you know, whatever), repeated word, abandoned start, or correction (no wait, I mean, sorry, actually).',
+      false: 'Every word carries meaning; the text reads like typed text.',
+    },
+  },
+  has_vague_reference: {
+    type: 'noul',
+    instructions: 'Does `prompt` point at its target only with a vague reference ("that bug", "the thing we did", "it", "the page") that neither `prompt` nor `recent_chat` makes clear?',
+    criteria: {
+      true: 'The main target is a pronoun or vague phrase, and no file, function, feature or error in `prompt` or `recent_chat` tells which one it means.',
+      false: 'The target is named in `prompt`, `recent_chat` makes clear which one it means, or the request needs no target.',
+    },
+  },
+  is_rambling: {
+    type: 'noul',
+    instructions: 'Is `prompt` disorganized: the goal is buried, ideas jump around, or the same point is made more than once?',
+    criteria: {
+      true: 'A reader must reorder or trim the text to find the goal.',
+      false: 'The goal is easy to find and each point appears once, in a sensible order.',
+    },
+  },
+}
+
+/** Reads JEV's answers: true = rewrite (any flaw), false = keep, null = no usable answer. */
+export function parseJev(stdout: string): boolean | null {
+  try {
+    const answers = JSON.parse(stdout)?.answers ?? {}
+    const p = Object.keys(JEV_QUESTIONS).map(k => answers[k]?.noul)
+    return p.every(v => typeof v === 'number') ? p.some(v => v >= JEV_THRESHOLD) : null
+  } catch {
+    return null
+  }
+}
+
+async function jevNeedsRewrite($: EngineInterface, text: string): Promise<boolean | null> {
+  const { home } = await paths($)
+  const key = ((await $.env.get('JEV_API_KEY').catch(() => undefined)) ?? (await $.fs.read(`${home}/.config/typesafe/key`).catch(() => ''))).trim()
+  if (!key) return null
+  // State holds evidence only, as JSON; the instructions refer to its fields by backticked name.
+  const recent_chat = (await $.session.messages().catch(() => []))
+    .slice(-JEV_CHAT)
+    .filter(m => m.text.trim())
+    .map(m => ({ role: m.role, text: m.text.slice(0, 1500) }))
+  const body = { model: 'jev-latest', state: { recent_chat, prompt: text }, questions: JEV_QUESTIONS }
+  const r = await $.process
+    .run(
+      ['sh', '-c', `curl -sS -m ${JEV_MS / 1000} ${JEV_URL} -H "Authorization: Bearer $JEV_API_KEY" -H "Content-Type: application/json" --data @-`],
+      { env: { PATH, HOME: home, JEV_API_KEY: key }, stdin: JSON.stringify(body), timeoutMs: JEV_MS + 1000 },
+    )
+    .catch(() => null)
+  return r && r.exitCode === 0 ? parseJev(r.stdout) : null
+}
+
 // Returns the polished text; the caller falls back to the plain text on a throw.
 async function polish($: EngineInterface, mode: Mode, fa: string, en: string) {
   const input = `<spoken>\n${fa}\n</spoken>\n<draft>\n${en}\n</draft>`
@@ -423,7 +489,9 @@ async function start($: EngineInterface) {
     const p = await loadPrefs($)
     const plain = preclean(raw)
     let text = plain
-    if (needsModel(p.mode, raw)) {
+    // JEV decides for prompt/chat; no key, a timeout or an error falls back to the rule.
+    const gate = p.mode === 'prompt' || p.mode === 'chat' ? await jevNeedsRewrite($, plain) : null
+    if (gate ?? needsModel(p.mode, raw)) {
       isPolishing = true
       background(async () => {
         while (isPolishing) { // spinner
