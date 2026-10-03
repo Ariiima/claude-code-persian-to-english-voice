@@ -99,7 +99,23 @@ When you release the key, you can improve the text: Claude rewrites it into a cl
 4. Read the text, change it if necessary, and press <kbd>Enter</kbd>.
 
 A single tap of <kbd>Space</kbd> still types a space.
-To record without holding a key, run `/fa rec`. Then run `/fa rec` again, or press **⏹ Stop**, to finish.
+
+To record without holding a key:
+
+1. Tap <kbd>Space</kbd> 3 times quickly. The **● REC** panel appears and shows "tap space to finish".
+2. Speak.
+3. Tap <kbd>Space</kbd> once. The text goes into the prompt box. With auto-send on, the plugin sends it.
+
+Tapped keys do not repeat, so the cursor does not move while you record.
+
+To cancel a recording, for example when the translation is wrong:
+
+- Type any letter while a <kbd>Space</kbd> recording runs, or while the plugin finishes or rewrites it. The letter does not type.
+- Or click **✕ Cancel** in the REC panel. This works for every recording.
+
+Nothing goes into the prompt box, and nothing is sent. You can start a new recording at once. `/fa last` still shows what you said.
+<kbd>Esc</kbd> cannot cancel a recording: Claude Code does not pass the <kbd>Esc</kbd> key to plugins.
+You can also run `/fa rec` to start, and run `/fa rec` again, or press **⏹ Stop**, to finish.
 
 ### Settings
 
@@ -326,7 +342,9 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | "Voice: nothing heard" | Check the microphone with `/fa mic`. Check that your terminal has microphone access in System Settings → Privacy & Security → Microphone. |
 | "No key: set SONIOX_API_KEY …" | Do step 4 of [Install](#install). |
 | Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the plugin folder. |
-| The cursor moves back and forth while you hold <kbd>Space</kbd> | This is a known limitation of hold-Space. Claude Code draws each key before a plugin can remove it. It occurs only while you record. To avoid it, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
+| The cursor moves back and forth at the start of a hold | Claude Code draws each key before a plugin can remove it. When a hold starts, the plugin adds the chord `space space` to `~/.claude/keybindings.json`. Then Claude Code takes the held <kbd>Space</kbd> itself, and the cursor stops. Claude Code reads the changed file after about 2 seconds, so the first 2 seconds of a hold still flicker. The plugin removes the chord when you release <kbd>Space</kbd>. To avoid the flicker completely, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
+| A key that you type right after a recording does not appear | After a hold, Claude Code can still wait for the second key of the `space space` chord for up to about 3 seconds, and it drops the next key. Wait until the text is in the prompt box, then type. |
+| <kbd>Space</kbd> does not type in the prompt box | The `space space` chord stayed in `~/.claude/keybindings.json` (for example, after a crash). The plugin removes it when a session starts. To remove it now, run `/reload-plugins`, or delete the `"space space"` line from the file. |
 | The shortcut does nothing | Run `/fa key` to see it. Check that no other binding in `~/.claude/keybindings.json` uses the same keys. |
 | "This does not look like a request for Claude" | JEV decided that you did not talk to Claude. Your text is in the prompt box. Press <kbd>Enter</kbd> to send it, or delete it. |
 | "The translation did not finish" | The recording was long, and Soniox did not finish in time. Claude translated your words instead. Run `/fa last` to see the Persian text. |

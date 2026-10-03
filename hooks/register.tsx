@@ -266,6 +266,45 @@ async function bindShortcut($: EngineInterface, chord: string | null) {
   await $.fs.write(file, `${JSON.stringify(kb, null, 2)}\n`)
 }
 
+// While a hold-Space recording runs, the chord `space space` presses the plugin's button (ACTION).
+// Claude Code then takes the held Space before the prompt draws it, so the cursor stays still, and
+// every 2nd repeat reaches press(), which keeps the recording alive. Tested live (Claude Code 2.1.287):
+// the binding applies ~2 s after the write; a lone Space left open at release is dropped, not typed,
+// and a key typed within ~3 s after it can be dropped too. Off at every exit, and at session start
+// in case a crash left it on (it would delay every Space in the prompt).
+const SPACE_CHORD = 'space space'
+let isChordArmed = false // this recording turned the chord on
+
+async function setSpaceChord($: EngineInterface, on: boolean) {
+  const file = `${(await paths($)).home}/.claude/keybindings.json`
+  const text = await $.fs.read(file).catch(() => '')
+  const kb: Keybindings = typeof text === 'string' && text.trim() ? JSON.parse(text) : {}
+  kb.bindings ??= []
+  let chat = kb.bindings.find(b => b.context === 'Chat')
+  if ((chat?.bindings[SPACE_CHORD] === ACTION) === on) return // already so: no write, no reload
+  if (on) {
+    if (!chat) kb.bindings.push((chat = { context: 'Chat', bindings: {} }))
+    chat.bindings[SPACE_CHORD] = ACTION
+  } else if (chat) delete chat.bindings[SPACE_CHORD]
+  await $.fs.write(file, `${JSON.stringify(kb, null, 2)}\n`)
+}
+
+// One write at a time, in order: an off that overtook a pending on would leave the chord on.
+let chordWrites: Promise<unknown> = Promise.resolve()
+const queueChord = ($: EngineInterface, on: boolean) => (chordWrites = chordWrites.then(() => setSpaceChord($, on)).catch(() => {}))
+
+function armChord($: EngineInterface) {
+  if (isChordArmed) return
+  isChordArmed = true
+  void queueChord($, true)
+}
+
+function disarmChord($: EngineInterface) {
+  if (!isChordArmed) return
+  isChordArmed = false
+  void queueChord($, false)
+}
+
 async function keyCommand($: EngineInterface, arg: string) {
   if (!arg) {
     const p = await loadPrefs($)
@@ -394,10 +433,32 @@ let lastFill: string | null = null // dictated text in the box, to learn from th
 let isSpaceHold = false // this recording was started by holding Space (not the shortcut, button or /fa)
 
 // Synchronous on purpose: the prompt.edit hook calls it before it answers the key (see there).
-function begin($: EngineInterface, held: boolean, tentative = false) {
+// Each recording's number. abort() frees the plugin at once, so the next recording can start while the
+// aborted one still winds down; that one then checks isMine() before it touches the shared state.
+let gen = 0
+let abortedGen = -1
+
+// Discards the recording that runs now, in any phase (recording, finishing, rewriting). Its words stay in /fa last.
+function abort($: EngineInterface) {
+  if (!isActive) return
+  abortedGen = gen
+  isActive = isTentative = isPolishing = isFinishing = false
+  disarmChord($)
+  // The stop file now, before any new recording can start (a new stream.py deletes an old one when it
+  // starts); start()'s poll loop also kills stream.py. A stop file written later could stop the next stream.
+  background(() => $.fs.write(STOP, ''))
+  background(() => update($, live, () => null))
+  $.ui.toast('🎙 Cancelled: nothing was put in or sent. Start again when you are ready. /fa last shows what you said.')
+}
+
+// `taps`: the spaces this start already counts as taps (see spaceWhileRecording).
+function begin($: EngineInterface, held: boolean, tentative = false, tapsSoFar = 0) {
+  gen++
   isActive = true
   isSpaceHold = held
   isTentative = tentative
+  taps = tapsSoFar
+  isTapMode = false
   isCancelled = isStopping = false
   isHeld = held
   lastPress = 0 // start() sets the clock times
@@ -426,10 +487,42 @@ async function press($: EngineInterface) {
   } else isStopping = true
 }
 
+// Tap Space 3 times to record without holding; tap it once more to finish. A space this long after
+// the one before is a tap; a shorter gap is the key repeat of a hold.
+// ponytail: fixed gap; a slow macOS key-repeat setting (180 ms or more) reads as taps, then raise it
+const TAP_MIN_MS = 140
+const TAPS_TO_START = 3
+let taps = 0
+let isTapMode = false // started by taps: no release to wait for, the next tap finishes
+let lastSpaceAt = 0 // every space's time is read the same way, so the gaps compare
+
+// A space while a Space recording runs: a key repeat (hold), a tap toward tap mode, or the finishing tap.
+// `isFirst`: the space that started the recording; only its time is kept.
+async function spaceWhileRecording($: EngineInterface, isBurst: boolean, isFirst = false) {
+  if (isTapMode) {
+    isStopping = true
+    return
+  }
+  const now = await $.clock.now()
+  const gap = now - lastSpaceAt
+  lastSpaceAt = now
+  if (isFirst) return
+  if (isBurst || gap < TAP_MIN_MS) return repeat($)
+  lastPress = now // a tap keeps a tentative start alive too
+  if (++taps < TAPS_TO_START) return
+  isTapMode = true
+  isHeld = false // nothing to release: the poll loop waits for isStopping
+  if (isTentative) {
+    isTentative = false
+    await update($, live, () => ({ ...latest, ms: now - startedAt }))
+  } else await redraw($)
+}
+
 // A held key's repeat: keep the recording alive (and show it, if it was tentative).
 async function repeat($: EngineInterface) {
   const now = await $.clock.now()
   lastPress = Math.max(lastPress, now)
+  armChord($) // a repeat means a real hold: from now on Claude Code takes the held Space (see SPACE_CHORD)
   if (isTentative) {
     isTentative = false
     await update($, live, () => ({ ...latest, ms: now - startedAt }))
@@ -461,6 +554,8 @@ async function spinning<T>($: EngineInterface, label: string, work: () => Promis
 
 // Stream mic -> Soniox until Stop, clean up, then put the text in the prompt box (or send it).
 async function start($: EngineInterface) {
+  const myGen = gen // read before the first await: begin() calls this right after gen++
+  const isMine = () => gen === myGen && abortedGen !== myGen
   isFinishing = isPolishing = false
   startedAt = await $.clock.now()
   lastPress = Math.max(lastPress, startedAt)
@@ -478,6 +573,11 @@ async function start($: EngineInterface) {
     try {
       while (isRunning) {
         await $.clock.sleep(100)
+        if (!isMine()) {
+          // Aborted: kill stream.py now. No stop file here: written this late, it could stop the next stream.
+          if (isRunning) await proc.return({ code: null, signal: null })
+          return
+        }
         const now = await $.clock.now()
         if (isCancelled || (isTentative && now - lastPress > HOLD_GAP_MS)) {
           isCancelled = true // start() then drops the text
@@ -490,8 +590,10 @@ async function start($: EngineInterface) {
           isStopping = true
           $.ui.toast('🎙 Stopped after 5 minutes')
         }
-        if (stopAt === null && (isStopping || (isHeld && now - lastPress > RELEASE_MS))) {
+        // A tentative start is not released but cancelled (above): no repeat came, so nothing was held.
+        if (stopAt === null && (isStopping || (isHeld && !isTentative && now - lastPress > RELEASE_MS))) {
           stopAt = now
+          disarmChord($) // released: Space types again (after Claude Code reloads the file)
           isFinishing = true
           await redraw($)
           await $.fs.write(STOP, '') // stream.py closes the mic, waits for the last words, then exits
@@ -515,7 +617,9 @@ async function start($: EngineInterface) {
         const lines = buf.split('\n')
         buf = lines.pop() ?? ''
         for (const line of lines) {
-          try { last = latest = JSON.parse(line) } catch { continue }
+          try { last = JSON.parse(line) } catch { continue }
+          if (!isMine()) continue // aborted: the shared view belongs to the next recording
+          latest = last
           frame++
           levels = [...levels.slice(-15), last.lvl ?? 0]
           const ms = (await $.clock.now()) - startedAt
@@ -526,11 +630,17 @@ async function start($: EngineInterface) {
   } catch (e) {
     err += String(e)
   } finally {
-    isRunning = isFinishing = false
+    isRunning = false
+    if (isMine()) isFinishing = false
   }
   try {
     const fa = last.fa.trim()
     const raw = last.en.trim()
+    if (!isMine()) {
+      // Aborted by the person: nothing goes in, but the words stay in /fa last.
+      if (fa || raw) await $.store.set(LAST, { fa, en: raw }).catch(() => {})
+      return
+    }
     // Only a tentative start is cancelled (one tap of Space, then typing): nothing was dictated, and saving
     // its noise would overwrite the real last dictation.
     if (isCancelled) return
@@ -545,7 +655,7 @@ async function start($: EngineInterface) {
       // A long recording can end before Soniox translates it: Claude translates the Persian, else the Persian goes in.
       $.ui.toast('🎙 The translation did not finish, so Claude translates your words. /fa last shows them.')
       const t = await spinning($, 'Translating', () => polish($, 'general', false, fa, '')).catch(() => '')
-      await put($, t || fa, false)
+      if (isMine()) await put($, t || fa, false) // not when aborted while Claude translated
       return
     }
     const plain = preclean(raw)
@@ -563,6 +673,7 @@ async function start($: EngineInterface) {
         return plain
       })
     }
+    if (!isMine()) return // aborted while JEV or Claude worked: nothing goes in, nothing is sent
     const send = p.autoSend && !j.hold && !j.aside
     if (p.autoSend && j.hold && !j.aside) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
     await put($, text, send)
@@ -574,8 +685,12 @@ async function start($: EngineInterface) {
       })
     }
   } finally {
-    isActive = isTentative = isPolishing = false
-    await update($, live, () => null)
+    if (gen === myGen) {
+      // still the latest recording (aborted or not): reset; a newer one owns the shared state otherwise
+      disarmChord($)
+      isActive = isTentative = isPolishing = false
+      await update($, live, () => null)
+    }
   }
 }
 
@@ -620,6 +735,8 @@ async function usePlain($: EngineInterface) {
 
 const HELP = `Persian voice
   hold space    talk, release to finish
+  tap space 3x  talk without holding; tap space once more to finish
+  a letter      while a Space recording runs (or is translated): cancel it, nothing goes in
   /fa           settings: see and change everything below
   /fa rec       start / stop a recording without holding a key
   /fa last      show your last recording again and put it in the prompt box
@@ -699,6 +816,7 @@ export const register: Register = on => {
       description: 'Persian voice: settings · /fa rec records without holding · /fa help lists all commands',
     })
     await applyPrefs($, await loadPrefs($))
+    await queueChord($, false) // a crash or a reload mid-recording can leave it on
     const { terms } = await paths($)
     if (!(await $.fs.exists(terms).catch(() => true))) {
       await $.fs.write(terms,'# Persian voice: words for speech recognition, one per line.\n# A line "persian = english" sets a translation, for example:\n# دیپلوی = deploy\n')
@@ -716,6 +834,12 @@ export const register: Register = on => {
     if (!isSpace) {
       lastSpace = null
       if (isActive && isTentative) isCancelled = true // it was a leading space, then typing
+      else if (isActive && isSpaceHold && (e.inputText !== '' || e.end > e.start)) {
+        // A letter (or a deletion) during a Space recording cancels it, and does not type. Escape cannot:
+        // Claude Code gives a plugin no event for it. A Backspace in an empty box gives none either.
+        abort($)
+        return { text: e.text, cursor: e.cursor }
+      }
       return next(e)
     }
     // The editor draws each key before this hook answers, so a swallowed space shows for the
@@ -723,19 +847,21 @@ export const register: Register = on => {
     // second, so these paths answer at once and keep the clock work for afterwards.
     if (isActive) {
       if (!isSpaceHold) return next(e) // started by the shortcut, button or /fa: typing stays normal
-      background(() => repeat($))
+      background(() => spaceWhileRecording($, isBurst))
       return next({ ...e, inputText: '' })
     }
     if (e.text.trim() === '') {
-      begin($, true, !isBurst)
+      begin($, true, !isBurst, isBurst ? 0 : 1)
+      background(() => spaceWhileRecording($, isBurst, true))
       return next({ ...e, inputText: '' }) // a leading space is useless anyway
     }
     // In text a single space types as usual, so the time check costs no jump here.
     const now = await $.clock.now()
     if (isBurst || (lastSpace !== null && now - lastSpace < HOLD_GAP_MS)) {
       lastSpace = null
-      begin($, true)
-      // Delete the hold's first space, which typed before the repeat showed it was a hold.
+      begin($, true, false, isBurst ? 0 : 2) // a hold, or the 2nd of 3 taps: the 3rd space tells
+      background(() => spaceWhileRecording($, isBurst, true))
+      // Delete the first space, which typed before the 2nd showed it was a hold or taps.
       const c = e.cursor
       if (c > 0 && e.text[c - 1] === ' ' && e.start === c && e.end === c) {
         return next({ ...e, text: e.text.slice(0, c - 1) + e.text.slice(c), cursor: c - 1, start: c - 1, end: c - 1, inputText: '' })
@@ -743,6 +869,12 @@ export const register: Register = on => {
       return next({ ...e, inputText: '' })
     }
     lastSpace = now
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    isChordArmed = false
+    await queueChord($, false) // quit mid-recording: Space must type in the next session
     return next(e)
   })
 
@@ -838,9 +970,11 @@ export const register: Register = on => {
     const byKey = !isSpaceHold // started by the shortcut, the button or /fa
     const hint =
       phase !== 'rec'
-        ? ''
+        ? byKey ? '' : 'type a letter to cancel'
         : !byKey
-          ? 'release space to finish'
+          ? isTapMode
+            ? 'tap space to finish · a letter cancels'
+            : 'release space to finish · a letter cancels'
           : isHeld
             ? `release ${p.shortcut ?? 'the key'} to finish`
             : `${p.shortcut ? `${p.shortcut} or ` : ''}/fa rec to finish`
@@ -853,12 +987,18 @@ export const register: Register = on => {
         </Box>
         <Text bold wrap="truncate-start">{l.fa || 'Listening…'}</Text>
         <Text dimColor wrap="truncate-start">→ {l.en || '…'}</Text>
-        {/* Drawn while the shortcut is held too: its repeats reach press() through this Button. */}
-        {phase === 'rec' && byKey && (
-          <Box>
-            <Button key="stop" label={p.shortcut ? `⏹ Stop (${p.shortcut})` : '⏹ Stop'} action={ACTION} onPress={() => press($)} />
-          </Box>
-        )}
+        {/* Drawn while a key is held too: the shortcut's repeats, or held Space's `space space` chord,
+            reach press() through this Button. */}
+        <Box gap={2}>
+          {phase === 'rec' &&
+            (byKey ? (
+              <Button key="stop" label={p.shortcut ? `⏹ Stop (${p.shortcut})` : '⏹ Stop'} action={ACTION} onPress={() => press($)} />
+            ) : (
+              <Button key="hold" label="🎙" plain action={ACTION} onPress={() => press($)} />
+            ))}
+          {/* In every phase: until the text is in the box (or sent), a click discards it. */}
+          <Button key="cancel" label="✕ Cancel" onPress={() => abort($)} />
+        </Box>
       </Box>
     )
   })

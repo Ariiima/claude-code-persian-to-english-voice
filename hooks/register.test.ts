@@ -29,11 +29,13 @@ function setup(
     jev?: Jev
     incomplete?: boolean
     submitDrop?: boolean
+    modelGate?: Promise<void> // the rewrite answers only once this resolves
   },
 ) {
   const clock = mock.clock(on)
+  // One stop signal per stream.py run, as each real run waits for its own stop file.
   let stop = () => {}
-  const stopped = new Promise<void>(resolve => (stop = resolve))
+  const nextStop = () => new Promise<void>(resolve => (stop = resolve))
   const out = {
     box: opts.box ?? '',
     submitted: '',
@@ -94,12 +96,14 @@ function setup(
   on('model.complete', async (_$, e) => {
     out.modelCalls++
     out.systems.push(e.system ?? '')
+    await opts.modelGate
     return opts.reply === null
       ? { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: {} as never } }
       : { value: { isAnswered: true as const, text: opts.reply ?? 'POLISHED', usage: {} as never } }
   })
   on('process.spawn', async function* () {
     out.spawned++
+    const stopped = nextStop()
     try {
       yield { stream: 'stdout' as const, text: `${JSON.stringify({ fa: opts.said.fa, en: '', lvl: 0.7 })}\n` }
       await stopped
@@ -211,6 +215,123 @@ test('hold space mid-text: stray space removed, short request filled without the
   await t.release()
   expect(t.out.box).toBe('fix Hello there')
   expect(t.out.modelCalls).toBe(0)
+})
+
+const tap = async (t: { key: (k: string) => Promise<void>; clock: { advance: (ms: number) => Promise<unknown> } }) => {
+  await t.key(' ')
+  await t.clock.advance(200) // a person's tap, not a key repeat
+}
+
+test('taps: Space 3 times records without holding; one more tap finishes', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'run the tests' } })
+  for (let i = 0; i < 3; i++) await tap(t)
+  await t.clock.advance(3000) // no key held, and still recording
+  const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
+  expect(await ui.find({ text: /tap space to finish/ })).toBeDefined()
+  expect(t.out.box).toBe('')
+  expect(chordOf(t.out.files)).toBeUndefined() // taps do not repeat, so no chord is needed
+  await t.key(' ')
+  for (let i = 0; i < 12; i++) await t.clock.advance(100)
+  expect(t.out.box).toBe('Run the tests')
+})
+test('taps: in text, the tapped spaces are removed and the text goes after it', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'run the tests' }, box: 'fix' })
+  for (let i = 0; i < 3; i++) await tap(t)
+  await t.clock.advance(3000)
+  expect(t.out.box).toBe('fix')
+  await t.key(' ')
+  for (let i = 0; i < 12; i++) await t.clock.advance(100)
+  expect(t.out.box).toBe('fix Run the tests')
+})
+test('cancel: a letter during a Space recording discards it; the letter does not type; /fa last keeps the words', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'run the tests' } })
+  for (let i = 0; i < 3; i++) await tap(t)
+  await t.key('x')
+  for (let i = 0; i < 30; i++) await t.clock.advance(100)
+  expect(t.out.box).toBe('')
+  expect(t.out.killed).toBe(true) // stream.py stopped
+  expect(t.out.toasts.some(s => s.includes('Cancelled'))).toBe(true)
+  expect((t.out.store.lastDictation as { fa: string }).fa).toBe('سلام')
+})
+test('cancel: the Cancel button while Claude rewrites, with auto-send on: nothing goes in, nothing is sent', async ($, on) => {
+  let answer = () => {}
+  const t = setup($, on, {
+    said: { fa: '...', en: 'um fix the the test, no sorry, the login test' },
+    prefs: { mode: 'prompt', autoSend: true, mic: '1' },
+    reply: 'Fix the login test.',
+    modelGate: new Promise<void>(resolve => (answer = resolve)),
+  })
+  await t.hold()
+  for (let i = 0; i < 12; i++) await t.clock.advance(100) // released; the rewrite runs
+  expect(t.out.modelCalls).toBe(1)
+  const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
+  await ui.press({ key: 'cancel' })
+  answer() // the rewrite ends after the cancel
+  for (let i = 0; i < 10; i++) await t.clock.advance(100)
+  expect(t.out.submitted).toBe('')
+  expect(t.out.box).toBe('')
+})
+test('cancel: a new recording can start at once after a cancel', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'run the tests' } })
+  for (let i = 0; i < 3; i++) await tap(t)
+  await t.key('x') // cancel
+  for (let i = 0; i < 3; i++) await tap(t) // start again right away
+  await t.clock.advance(1000)
+  await t.key(' ') // finish
+  for (let i = 0; i < 20; i++) await t.clock.advance(100)
+  expect(t.out.box).toBe('Run the tests')
+  expect(t.out.spawned).toBe(2)
+})
+test('a single Space at an empty prompt, then nothing: cancelled, so background noise is not filled in', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'some noise' } })
+  await t.key(' ')
+  for (let i = 0; i < 30; i++) await t.clock.advance(100)
+  expect(t.out.box).toBe('')
+})
+test('taps: two taps at an empty prompt start nothing', async ($, on) => {
+  const t = setup($, on, { said: { fa: 'سلام', en: 'run the tests' } })
+  await tap(t)
+  await tap(t)
+  for (let i = 0; i < 30; i++) await t.clock.advance(100)
+  const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
+  expect(await ui.find({ text: /Hold space to talk/ })).toBeDefined() // the idle band: no recording
+  expect(t.out.box).toBe('')
+})
+
+const chordOf = (files: Record<string, string>) =>
+  (JSON.parse(files[KB] ?? '{}').bindings ?? []).find((b: { context: string }) => b.context === 'Chat')?.bindings['space space']
+
+test('cursor: a held Space binds the `space space` chord while it records, and only then', async ($, on) => {
+  const mine = { bindings: [{ context: 'Global', bindings: { 'ctrl+e': 'chat:externalEditor' } }] }
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' }, files: { [KB]: JSON.stringify(mine) } })
+  await t.hold()
+  expect(chordOf(t.out.files)).toBe('app:toggleDiffPreSession') // Claude Code takes the held Space
+  await t.release()
+  expect(t.out.box).toBe('Run the tests')
+  expect(chordOf(t.out.files)).toBeUndefined() // released: Space types again
+  expect(JSON.parse(t.out.files[KB] ?? '{}').bindings[0]).toEqual(mine.bindings[0]) // the person's bindings stay
+})
+test('cursor: the chord\'s button presses keep the recording alive, and it ends when they stop', async ($, on) => {
+  const t = setup($, on, { said: { fa: '...', en: 'run the tests' } })
+  await t.hold()
+  const ui = await $.ui.mount({ plugin: 'persian-voice', surface: 'terminal', component: 'AbovePrompt', props: ABOVE })
+  for (let i = 0; i < 20; i++) {
+    // Space now reaches the plugin only as the chord's presses of its button, not as typed spaces
+    await ui.press({ key: 'hold' })
+    await t.clock.advance(70)
+  }
+  expect(t.out.box).toBe('') // 1.4 s without a typed space, and still recording
+  await t.release()
+  expect(t.out.box).toBe('Run the tests')
+})
+test('cursor: a chord left on by a crash is removed when the session starts', async ($, on) => {
+  const stale = { bindings: [{ context: 'Chat', bindings: { 'space space': 'app:toggleDiffPreSession', 'ctrl+e': 'chat:externalEditor' } }] }
+  const t = setup($, on, { said: { fa: '', en: '' }, files: { [KB]: JSON.stringify(stale) } })
+  on('command.register', async () => ({ value: undefined }) as never)
+  on('session.start', async () => ({ cwd: '/tmp' }) as never) // the engine's own answer, beneath the plugin
+  await ($.session as unknown as { start: (e: unknown) => Promise<unknown> }).start({ cwd: '/tmp' }) // the reload after the crash
+  expect(chordOf(t.out.files)).toBeUndefined()
+  expect(JSON.parse(t.out.files[KB] ?? '{}').bindings[0].bindings['ctrl+e']).toBe('chat:externalEditor')
 })
 
 test('polish: a self-corrected request goes through the model; Use plain translation swaps it back', async ($, on) => {
