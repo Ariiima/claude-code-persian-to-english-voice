@@ -42,6 +42,11 @@ const undo = atom({ plugin: 'persian-voice', key: 'undo' } as const, null as Und
 
 // label: the button and the dialog; about: one line for the person; task: the model's instruction.
 const MODES: Record<Mode, { label: string; about: string; task: string }> = {
+  auto: {
+    label: 'Auto',
+    about: 'JEV picks Prompt, Spec or Commit msg from what you said. Without a JEV key it works like Prompt.',
+    task: '', // plan() replaces auto with the mode JEV picks
+  },
   prompt: {
     label: 'Prompt',
     about: 'Claude rewrites what you said into a clear prompt: the goal first, then your details. Short, clear requests skip this and stay as they are.',
@@ -64,7 +69,7 @@ const MODES: Record<Mode, { label: string; about: string; task: string }> = {
   },
   exact: { label: 'Exact', about: 'Only the translation, with fillers like "um" removed. No AI rewrite.', task: '' },
 }
-const MODE_ORDER: Mode[] = ['prompt', 'chat', 'spec', 'commit', 'exact']
+const MODE_ORDER: Mode[] = ['auto', 'prompt', 'chat', 'spec', 'commit', 'exact']
 
 const RULES = `You are a rewriter, not an assistant. Someone else (Claude Code, an AI coding agent) acts on your output later.
 Input: <spoken> holds the speaker's words (Persian, English or mixed), <draft> a rough English version.
@@ -97,70 +102,81 @@ export function needsModel(mode: Mode, raw: string) {
   return raw.split(/\s+/).length > 8 || CORRECTIONS.test(raw)
 }
 
-// ---------- JEV gate: a fast yes/no model decides if the rewrite is needed at all ----------
+// ---------- JEV (TypeSafe): fast typed judgments before and after the Claude rewrite ----------
+// The questions live in hooks/jev.json; tools/jev_eval.py scores that same file on labelled cases.
+// One proposition per question, and code combines the answers (TypeSafe's guidance).
 
 const JEV_URL = 'https://api.typesafe.ai/v1/systemone'
-const JEV_MS = 2500 // slower than this: use the rule in needsModel (most calls take ~1 s)
-const JEV_THRESHOLD = 0.5 // ponytail: JEV's own yes/no midpoint; tune with real prompts
+const JEV_MS = 2500 // slower than this: carry on without JEV (most calls take ~1 s)
+const JEV_THRESHOLD = 0.5 // ponytail: JEV's yes/no midpoint; retune with tools/jev_eval.py
+const JEV_DROP_BELOW = 0.2 // is_for_agent: losing a real prompt costs more than keeping noise
+const JEV_HOLD_AT = 0.3 // is_irreversible: a missed one costs more than one extra Enter
 const JEV_CHAT = 4 // recent messages sent with the prompt (JEV's state limit is ~32k tokens)
-// One proposition per question, high = a flaw; code ORs them (TypeSafe's Noul guidance).
-// Question names never reach the model: the instructions and criteria carry the meaning.
-// Checked on 12 labelled prompts + 5 chat cases: 17/17 (one big question scored 7/12).
-const JEV_QUESTIONS = {
-  has_noise: {
-    type: 'noul',
-    instructions: 'Does `prompt` contain spoken-language noise: filler words, repeated words, false starts, or a self-correction where the speaker changes what they said?',
-    criteria: {
-      true: 'At least one filler (um, like, you know, whatever), repeated word, abandoned start, or correction (no wait, I mean, sorry, actually).',
-      false: 'Every word carries meaning; the text reads like typed text.',
-    },
-  },
-  has_vague_reference: {
-    type: 'noul',
-    instructions: 'Does `prompt` point at its target only with a vague reference ("that bug", "the thing we did", "it", "the page") that neither `prompt` nor `recent_chat` makes clear?',
-    criteria: {
-      true: 'The main target is a pronoun or vague phrase, and no file, function, feature or error in `prompt` or `recent_chat` tells which one it means.',
-      false: 'The target is named in `prompt`, `recent_chat` makes clear which one it means, or the request needs no target.',
-    },
-  },
-  is_rambling: {
-    type: 'noul',
-    instructions: 'Is `prompt` disorganized: the goal is buried, ideas jump around, or the same point is made more than once?',
-    criteria: {
-      true: 'A reader must reorder or trim the text to find the goal.',
-      false: 'The goal is easy to find and each point appears once, in a sensible order.',
-    },
-  },
-}
 
-/** Reads JEV's answers: true = rewrite (any flaw), false = keep, null = no usable answer. */
-export function parseJev(stdout: string): boolean | null {
+type JevSet = 'before' | 'after'
+let jevQuestions: Record<JevSet, Record<string, unknown>> | null = null
+
+/** JEV's answer per question: a noul's probability or a choice's option. */
+export type Answers = Record<string, number | string>
+
+/** Reads JEV's response; null when any asked question has no usable answer. */
+export function parseJev(stdout: string, names: string[]): Answers | null {
   try {
-    const answers = JSON.parse(stdout)?.answers ?? {}
-    const p = Object.keys(JEV_QUESTIONS).map(k => answers[k]?.noul)
-    return p.every(v => typeof v === 'number') ? p.some(v => v >= JEV_THRESHOLD) : null
+    const a = JSON.parse(stdout)?.answers ?? {}
+    const out: Answers = {}
+    for (const k of names) {
+      const isChoice = a[k]?.type === 'choice'
+      const v = isChoice ? a[k].choice : a[k]?.noul
+      if (typeof v !== (isChoice ? 'string' : 'number')) return null
+      out[k] = v
+    }
+    return out
   } catch {
     return null
   }
 }
 
-async function jevNeedsRewrite($: EngineInterface, text: string): Promise<boolean | null> {
+/** What happens to the dictated text. `mode`: the rewrite to run, or null for none. */
+export type Plan = { drop: boolean; hold: boolean; mode: Mode | null }
+
+/** Turns the "before" answers into a plan; without them (no key, slow, error), the old rules. */
+export function plan(mode: Mode, raw: string, a: Answers | null): Plan {
+  const m: Mode = mode === 'auto' ? ((a?.mode as Mode | undefined) ?? 'prompt') : mode
+  if (!a) return { drop: false, hold: false, mode: needsModel(m, raw) ? m : null }
+  const yes = (k: string) => (a[k] as number) >= JEV_THRESHOLD
+  const vague = yes('has_vague_reference') || yes('chat_resolves_reference')
+  const flaw = vague || yes('has_noise') || yes('is_rambling') || yes('mistranslated')
+  // spec and commit always reshape; prompt/chat only fix a flaw, through the chat fork when a reference needs the transcript
+  const rewrite = m === 'exact' ? null : m === 'spec' || m === 'commit' ? m : !flaw ? null : vague ? 'chat' : m
+  return { drop: (a.is_for_agent as number) < JEV_DROP_BELOW, hold: (a.is_irreversible as number) >= JEV_HOLD_AT, mode: rewrite }
+}
+
+/** The "after" answers: true when the rewrite added, changed or dropped something the speaker said. */
+export function rewriteChangedMeaning(a: Answers | null) {
+  return !!a && ['adds_request', 'changes_fact', 'drops_fact'].some(k => (a[k] as number) >= JEV_THRESHOLD)
+}
+
+/** Asks one question set of hooks/jev.json; null when JEV cannot answer in time. */
+async function askJev($: EngineInterface, set: JevSet, state: Record<string, string>): Promise<Answers | null> {
   const { home } = await paths($)
   const key = ((await $.env.get('JEV_API_KEY').catch(() => undefined)) ?? (await $.fs.read(`${home}/.config/typesafe/key`).catch(() => ''))).trim()
   if (!key) return null
+  jevQuestions ??= await $.fs.read(`${$.plugin.root}/hooks/jev.json`).then(JSON.parse).catch(() => null)
+  const questions = jevQuestions?.[set]
+  if (!questions) return null
   // State holds evidence only, as JSON; the instructions refer to its fields by backticked name.
   const recent_chat = (await $.session.messages().catch(() => []))
     .slice(-JEV_CHAT)
     .filter(m => m.text.trim())
     .map(m => ({ role: m.role, text: m.text.slice(0, 1500) }))
-  const body = { model: 'jev-latest', state: { recent_chat, prompt: text }, questions: JEV_QUESTIONS }
+  const body = { model: 'jev-latest', state: { recent_chat, ...state }, questions }
   const r = await $.process
     .run(
       ['sh', '-c', `curl -sS -m ${JEV_MS / 1000} ${JEV_URL} -H "Authorization: Bearer $JEV_API_KEY" -H "Content-Type: application/json" --data @-`],
       { env: { PATH, HOME: home, JEV_API_KEY: key }, stdin: JSON.stringify(body), timeoutMs: JEV_MS + 1000 },
     )
     .catch(() => null)
-  return r && r.exitCode === 0 ? parseJev(r.stdout) : null
+  return r && r.exitCode === 0 ? parseJev(r.stdout, Object.keys(questions)) : null
 }
 
 // Returns the polished text; the caller falls back to the plain text on a throw.
@@ -488,10 +504,14 @@ async function start($: EngineInterface) {
     }
     const p = await loadPrefs($)
     const plain = preclean(raw)
+    const fa = last.fa.trim()
+    const j = plan(p.mode, raw, await askJev($, 'before', { spoken: fa, prompt: plain }))
+    if (j.drop) {
+      $.ui.toast(`🎙 Not a request, so it was ignored: "${plain.slice(0, 80)}"`)
+      return
+    }
     let text = plain
-    // JEV decides for prompt/chat; no key, a timeout or an error falls back to the rule.
-    const gate = p.mode === 'prompt' || p.mode === 'chat' ? await jevNeedsRewrite($, plain) : null
-    if (gate ?? needsModel(p.mode, raw)) {
+    if (j.mode) {
       isPolishing = true
       background(async () => {
         while (isPolishing) { // spinner
@@ -500,11 +520,17 @@ async function start($: EngineInterface) {
           await redraw($)
         }
       })
-      text = await polish($, p.mode, last.fa.trim(), plain).catch(() => plain)
+      text = await polish($, j.mode, fa, plain).catch(() => plain)
+      if (text !== plain && rewriteChangedMeaning(await askJev($, 'after', { spoken: fa, draft: plain, rewritten: text }))) {
+        $.ui.toast('The rewrite changed what you said, so your own words are used')
+        text = plain
+      }
       isPolishing = false
     }
-    await put($, text, p.autoSend)
-    if (text !== plain && !p.autoSend) {
+    const send = p.autoSend && !j.hold
+    if (p.autoSend && j.hold) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
+    await put($, text, send)
+    if (text !== plain && !send) {
       await update($, undo, () => ({ raw: plain, polished: text }))
       background(async () => {
         await $.clock.sleep(UNDO_MS)

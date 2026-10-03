@@ -172,7 +172,8 @@ The mode sets what happens to your words after you stop speaking.
 
 | Mode | Shown as | Result | Uses a model |
 | --- | --- | --- | --- |
-| `prompt` (default) | Prompt | A clear prompt: the goal first, then the details you gave. | Only for long or self-corrected requests |
+| `auto` | Auto | JEV selects `prompt`, `spec` or `commit` from what you said (see [JEV checks](#jev-checks-optional)). Without a JEV key, it works like `prompt`. | As the selected mode |
+| `prompt` (default) | Prompt | A clear prompt: the goal first, then the details you gave. | Only when JEV finds a problem. Without JEV: only for long or self-corrected requests |
 | `chat` | Prompt (reads this chat) | Like `prompt`, but Claude also reads this conversation (see below). Slower. | Yes (the session's model) |
 | `spec` | Spec | A task spec with Goal, Context, Requirements and Done when. Good for thinking aloud. | Yes |
 | `commit` | Commit msg | A git commit message. | Yes |
@@ -194,6 +195,33 @@ The rewrite uses Claude Sonnet 5.5 at low effort, through your Claude Code login
 If the rewrite takes more than 8 seconds or fails, the plain translation is used.
 The rewrite never adds requirements that you did not say.
 
+### JEV checks (optional)
+
+[JEV](https://docs.typesafe.ai) is a fast decision model from TypeSafe. It does not write text. It answers yes/no and choice questions with probabilities, in about 1 second.
+When you set a JEV key, the plugin asks JEV these questions about each recording:
+
+| Check | What the plugin does |
+| --- | --- |
+| Does the text have fillers, a vague reference, rambling, or a translation error? | It runs the Claude rewrite only when the answer is yes. A clear request goes into the prompt box at once. |
+| Does the recent chat make a vague reference clear ("fix that bug")? | It rewrites in the `chat` mode, so Claude replaces the reference with the real name. |
+| Is the text a request for the coding agent? | When JEV is sure that it is not (for example, you talk to another person), the plugin ignores the text and shows it in a message. |
+| Does the request do something that you cannot undo (delete, force-push, deploy)? | With auto-send on, the plugin does not send the prompt. It puts the text in the prompt box. Press <kbd>Enter</kbd> to send it. |
+| Which mode fits? (`auto` mode only) | It uses `prompt`, `spec` or `commit`. |
+| After the rewrite: did Claude add, change or remove something that you said? | It uses your own words instead of the rewrite. |
+
+To turn on the checks, save your TypeSafe key:
+
+```sh
+mkdir -p ~/.config/typesafe
+printf '%s' 'YOUR_JEV_API_KEY' > ~/.config/typesafe/key
+chmod 600 ~/.config/typesafe/key
+```
+
+You can also set the `JEV_API_KEY` environment variable.
+Without a key, or when JEV does not answer in 2.5 seconds, the plugin uses its old rules. You do not lose a recording.
+
+The questions are in `hooks/jev.json`. To test a change to them on labelled examples, run `python3 tools/jev_eval.py`.
+
 ## How it works
 
 ```mermaid
@@ -202,17 +230,21 @@ flowchart LR
     B -- "audio" --> C["Soniox<br/>speech to text + translation"]
     C -- "words + English, live" --> D["REC panel<br/>above the prompt"]
     D -- "release Space" --> E["Rule cleanup<br/>remove fillers"]
-    E --> F{"Needs a<br/>rewrite?"}
+    E --> F{"JEV (or rules):<br/>needs a rewrite?"}
     F -- "no" --> G["Prompt box"]
     F -- "yes" --> H["Claude rewrite<br/>(the selected mode)"]
-    H --> G
+    H --> J{"JEV: same<br/>meaning?"}
+    J -- "yes" --> G
+    J -- "no: your words" --> G
     G -- "Enter, or auto-send" --> I["Claude Code"]
 ```
 
 1. The plugin (`hooks/register.tsx`) watches the prompt box. A held key sends the same character many times. When spaces repeat fast, the plugin starts a recording. A shortcut is a Claude Code keybinding that presses the plugin's **Talk** button.
 2. `stt/stream.py` reads the microphone with ffmpeg and sends the audio to Soniox. It prints the live text and the microphone level 6–7 times each second.
 3. When you release the key, the plugin tells `stream.py` to stop. Soniox then confirms the last words and their translation.
-4. The plugin cleans the text and, if necessary, asks Claude to rewrite it. Then it puts the text in the prompt box.
+4. The plugin cleans the text. With a JEV key, JEV decides if the text needs a rewrite. Without a key, simple rules decide.
+5. If necessary, the plugin asks Claude to rewrite the text. JEV then checks that the rewrite keeps your meaning.
+6. The plugin puts the text in the prompt box.
 
 ## Configuration
 
@@ -251,7 +283,8 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 
 - **Audio** goes to Soniox for recognition and translation. Recording runs only while you hold <kbd>Space</kbd>, or between two presses of your shortcut or `/fa rec`. It stops by itself after 5 minutes.
 - **Text** goes to Anthropic only when the rewrite runs. It uses your own Claude Code login.
-- **Your API key** stays in `~/.config/soniox/key` or in your environment. It is never written to this folder.
+- **Text for JEV** goes to TypeSafe only when you set a JEV key. It contains your words, their translation and the last 4 messages of the chat.
+- **Your API keys** stay in `~/.config/soniox/key`, `~/.config/typesafe/key` or your environment. They are never written to this folder.
 
 ## Troubleshooting
 
@@ -263,6 +296,8 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the plugin folder. |
 | The cursor moves back and forth while you hold <kbd>Space</kbd> | This is a known limitation of hold-Space. Claude Code draws each key before a plugin can remove it. It occurs only while you record. To avoid it, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
 | The shortcut does nothing | Run `/fa key` to see it. Check that no other binding in `~/.claude/keybindings.json` uses the same keys. |
+| "Not a request, so it was ignored" | JEV decided that you did not talk to Claude. The message shows the text. Say the request again, or remove the JEV key to turn off the checks. |
+| "Not sent: this asks for something that cannot be undone" | JEV found a risky request while auto-send is on. Check the text in the prompt box, then press <kbd>Enter</kbd>. |
 
 ## Development
 
@@ -271,6 +306,8 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 hooks/hooks.json             loads the hooks module
 hooks/register.tsx           the plugin: hold detection, live view, cleanup, commands
 hooks/register.test.ts       tests
+hooks/jev.json               the JEV questions
+tools/jev_eval.py            scores the JEV questions on labelled examples (live API)
 types/index.d.ts             types of the plugin's shared state
 stt/stream.py                microphone → Soniox stream
 requirements.txt             Python dependency

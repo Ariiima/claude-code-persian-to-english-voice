@@ -2,7 +2,7 @@
 export type Live = { fa: string; en: string; lvl?: number; ms?: number; done?: boolean }
 
 /** How the English is cleaned up before it goes into the prompt box. */
-export type Mode = 'exact' | 'prompt' | 'chat' | 'spec' | 'commit'
+export type Mode = 'auto' | 'exact' | 'prompt' | 'chat' | 'spec' | 'commit'
 
 /** The person's settings, global ($.store). */
 export type Prefs = {
