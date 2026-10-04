@@ -727,9 +727,9 @@ async function put($: EngineInterface, text: string, autoSend: boolean) {
     const full = before + piece + box.text.slice(box.cursor)
     await $.prompt.fill({ text: '', mode: 'replace' })
     lastFill = null
-    // ponytail: the engine marks this submit as sent by the plugin (PromptSubmitArgs has no `origin`); a plugin cannot remove that label
+    // asUser: the model reads the dictation bare, without the "plugin sent a message" frame
     background(async () => {
-      const r = await $.prompt.submit({ text: full }).catch(() => null)
+      const r = await $.prompt.submit({ text: full, asUser: true }).catch(() => null)
       if (r && r.drop === undefined) return
       // Not sent (a hook dropped it, or the submit failed): the text goes back in the box, not lost.
       await $.prompt.fill({ text: full, mode: 'insert' })
