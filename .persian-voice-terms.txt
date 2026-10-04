@@ -1,7 +1,0 @@
-# Persian voice: words for speech recognition in this project, one per line.
-Soniox
-JEV
-TypeSafe
-AVFoundation
-ffmpeg
-STT
