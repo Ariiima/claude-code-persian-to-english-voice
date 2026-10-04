@@ -73,6 +73,8 @@ When you release the key, you can improve the text: Claude rewrites it into a cl
 
    You can also set the `SONIOX_API_KEY` environment variable instead.
 
+   To use Google instead (`/fa engine google`), save a Gemini API key the same way in `~/.config/gemini/key`, or set `GEMINI_API_KEY`. The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
+
 5. Load the plugin in Claude Code. Choose one option:
 
    - **Every session:** add the folder to `~/.claude/settings.json`:
@@ -324,6 +326,8 @@ useEffect
 دیپلوی = deploy
 ```
 
+For words that belong to one project, create `.persian-voice-terms.txt` in the project folder. It has the same format. The plugin reads it together with the global list, and only in that project. Commit the file to share it with your team.
+
 The plugin also adds the project name, the git branch and the project's file names by itself.
 
 ### Where settings are saved
@@ -337,6 +341,10 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | Variable | Meaning |
 | --- | --- |
 | `SONIOX_API_KEY` | The Soniox key. If it is not set, the key is read from `~/.config/soniox/key`. |
+| `FA_ENGINE` | `soniox` (default) or `google`. |
+| `GEMINI_API_KEY` | The Gemini key for `google`. If it is not set, the key is read from `~/.config/gemini/key`. |
+| `FA_GEMINI_MODEL` | The Gemini model. Default `gemini-3.5-transcribe-live`. |
+| `FA_GEMINI_LANGS` | BCP-47 codes to favour, comma separated. Default: `fa-IR`. It still reads English words and English-only speech. Empty means the model detects the language, which split `parseOrder` into "parse order" in tests. |
 | `FA_MIC` | The microphone: an AVFoundation index, or `default`. |
 | `FA_CONTEXT` | Project words for Soniox, as JSON. |
 | `FA_STOP` | The file that tells the stream to finish. |

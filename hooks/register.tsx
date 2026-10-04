@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Live, Mode, Prefs, Undo } from '../types'
+import type { Engine, Live, Mode, Prefs, Undo } from '../types'
 import { JEV_QUESTIONS } from './jev'
 import { PROMPTS } from './prompts'
 
@@ -40,7 +40,7 @@ const POLISH_EFFORT = 'low'
 const POLISH_MS = 8000 // slower than this: use the plain translation
 
 const live = atom({ plugin: 'persian-voice', key: 'live' } as const, null as Live | null)
-const DEFAULT_PREFS: Prefs = { mode: 'prompt', autoSend: false, mic: 'default', holdSpace: true, shortcut: null }
+const DEFAULT_PREFS: Prefs = { engine: 'soniox', mode: 'prompt', autoSend: false, mic: 'default', holdSpace: true, shortcut: null }
 const prefs = atom({ plugin: 'persian-voice', key: 'prefs' } as const, DEFAULT_PREFS)
 const undo = atom({ plugin: 'persian-voice', key: 'undo' } as const, null as Undo | null)
 
@@ -65,6 +65,9 @@ const MODES: Record<Mode, { label: string; about: string }> = {
   exact: { label: 'Exact', about: 'Only the translation, with fillers like "um" removed. No AI rewrite.' },
 }
 const MODE_ORDER: Mode[] = ['auto', 'prompt', 'chat', 'spec', 'commit', 'exact']
+
+// Who recognizes the speech. Soniox also translates; Gemini only transcribes, so Claude makes the English.
+const ENGINES: Record<Engine, string> = { soniox: 'Soniox', google: 'Google (Gemini 3.5 Transcribe)' }
 
 // The rewrite prompts per task kind live in prompts.ts (tools/rewrite_eval.py runs that same object).
 // JEV's `kind` question (jev.ts) picks one; its options are these names.
@@ -364,9 +367,12 @@ let context: { cwd: string; json: string } | null = null
 
 const SKIP_FILES = /\.(png|jpe?g|gif|svg|ico|webp|lock|map|woff2?|ttf|otf|mp[34]|wav|zip|gz|pdf)$/i
 
+// The global list plus `.persian-voice-terms.txt` in the project folder (same format; commit it to share it).
 async function readTerms($: EngineInterface) {
-  const text = await $.fs.read((await paths($)).terms).catch(() => '')
-  const lines = (typeof text === 'string' ? text : '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+  const cwd = await $.session.cwd().catch(() => '')
+  const read = (file: string) => $.fs.read(file).catch(() => '')
+  const texts = await Promise.all([read((await paths($)).terms), cwd ? read(`${cwd}/.persian-voice-terms.txt`) : ''])
+  const lines = texts.flatMap(t => (typeof t === 'string' ? t : '').split('\n')).map(l => l.trim()).filter(l => l && !l.startsWith('#'))
   const pairs = lines.filter(l => l.includes('=')).map(l => l.split('=').map(s => s.trim()) as [string, string])
   return { words: lines.filter(l => !l.includes('=')), pairs: pairs.filter(([s, t]) => s && t) }
 }
@@ -414,11 +420,21 @@ async function refreshContext($: EngineInterface) {
 /** Technical-looking words the person added while editing the dictated text before sending. */
 export function newTerms(filled: string, sent: string) {
   const split = (s: string) => s.split(/[\s,;:!?()"'`]+/).map(w => w.replace(/\.+$/, '')).filter(Boolean)
-  const said = new Set(split(filled))
-  const words = split(sent)
-  if (words.filter(w => said.has(w)).length < said.size / 2) return [] // not an edit of the dictated text
-  const isTechnical = (w: string) => /^[A-Za-z_$][\w$.\-/]*$/.test(w) && /[A-Z_$./\d]/.test(w.slice(1))
-  return [...new Set(words.filter(w => !said.has(w) && isTechnical(w)))].slice(0, 10)
+  const a = split(filled)
+  const b = split(sent)
+  const said = new Set(a)
+  if (b.filter(w => said.has(w)).length < said.size / 2) return [] // not an edit of the dictated text
+  // Only one corrected span counts: the words before and after it are unchanged, and it replaced some dictated words.
+  let head = 0
+  while (head < a.length && head < b.length && a[head] === b[head]) head++
+  let tail = 0
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++
+  const removed = a.length - head - tail
+  const added = b.slice(head, b.length - tail)
+  if (removed < 1 || added.length > 4) return [] // a pure addition is new text, not a correction
+  // camelCase, snake_case, a path or a digit; a plain capital word like "STE" is an acronym, not a misheard term
+  const isTechnical = (w: string) => /^[A-Za-z_$][\w$.\-/]*$/.test(w) && /[a-z][A-Z]|[_$./\d]/.test(w.slice(1))
+  return [...new Set(added.filter(w => !said.has(w) && isTechnical(w)))].slice(0, 10)
 }
 
 async function learn($: EngineInterface, filled: string, sent: string) {
@@ -426,7 +442,7 @@ async function learn($: EngineInterface, filled: string, sent: string) {
   if (!add.length) return
   const merged = [...new Set([...add, ...(await learnedTerms($))])].slice(0, 200)
   await $.store.set('learned', merged)
-  $.ui.toast(`📚 Learned: ${add.join(', ')}`)
+  $.ui.toast(`📚 Learned: ${add.join(', ')} (wrong? /fa forget <word>)`)
   void refreshContext($)
 }
 
@@ -436,6 +452,7 @@ let isActive = false
 let isTentative = false // started on the 1st space of an empty prompt; cancelled when no repeat follows
 let isCancelled = false
 let isStopping = false
+let sendNow = false // the Send button: send this recording even with auto-send off
 let isFinishing = false
 let isPolishing = false
 let polishLabel = '' // what the spinner says: the rewrite kind, or "Translating"
@@ -477,7 +494,7 @@ function begin($: EngineInterface, held: boolean, tentative = false, tapsSoFar =
   isTentative = tentative
   taps = tapsSoFar
   isTapMode = false
-  isCancelled = isStopping = false
+  isCancelled = isStopping = sendNow = false
   isHeld = held
   lastPress = 0 // start() sets the clock times
   levels = []
@@ -579,8 +596,13 @@ async function start($: EngineInterface) {
   lastPress = Math.max(lastPress, startedAt)
   if (!isTentative) await update($, live, () => ({ fa: '', en: '', ms: 0 }))
   const p = await paths($)
-  const env: Record<string, string> = { PATH, HOME: p.home, FA_STOP: STOP, FA_MIC: (await read($, prefs)).mic }
+  const pref = await read($, prefs)
+  const env: Record<string, string> = { PATH, HOME: p.home, FA_STOP: STOP, FA_MIC: pref.mic, FA_ENGINE: pref.engine }
   if (context) env.FA_CONTEXT = context.json
+  if (pref.engine === 'google') {
+    const g = await $.env.get('GEMINI_API_KEY').catch(() => undefined)
+    if (g) env.GEMINI_API_KEY = g // else stream.py reads ~/.config/gemini/key
+  }
   const proc = $.process.spawn({ argv: [p.python, p.script], env })
   let last: Live = { fa: '', en: '' }
   let err = ''
@@ -653,7 +675,7 @@ async function start($: EngineInterface) {
   }
   try {
     const fa = last.fa.trim()
-    const raw = last.en.trim()
+    let raw = last.en.trim()
     if (!isMine()) {
       // Aborted by the person: nothing goes in, but the words stay in /fa last.
       if (fa || raw) await $.store.set(LAST, { fa, en: raw }).catch(() => {})
@@ -669,6 +691,8 @@ async function start($: EngineInterface) {
       return
     }
     const p = await loadPrefs($)
+    // Gemini only transcribes: Claude makes the English draft, then the normal JEV / rewrite steps run on it.
+    if (!raw && p.engine === 'google') raw = await spinning($, 'Translating', () => polish($, 'general', false, fa, '')).catch(() => '')
     if (!raw) {
       // A long recording can end before Soniox translates it: Claude translates the Persian, else the Persian goes in.
       $.ui.toast('🎙 The translation did not finish, so Claude translates your words. /fa last shows them.')
@@ -698,8 +722,9 @@ async function start($: EngineInterface) {
       })
     }
     if (!isMine()) return // aborted while JEV or Claude worked: nothing goes in, nothing is sent
-    const send = p.autoSend && !j.hold && !j.aside
-    if (p.autoSend && j.hold && !j.aside) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
+    const wantsSend = p.autoSend || sendNow
+    const send = wantsSend && !j.hold && !j.aside
+    if (wantsSend && j.hold && !j.aside) $.ui.toast('⚠ Not sent: this asks for something that cannot be undone. Check it, then press Enter.')
     await put($, text, send)
     if (text !== plain && !send) {
       await update($, undo, () => ({ raw: plain, polished: text }))
@@ -769,8 +794,10 @@ const HELP = `Persian voice
   /fa mode [m]  cleanup: ${MODE_ORDER.join(' · ')}
   /fa polish    cleanup on / off (prompt <-> exact)
   /fa send      auto-send on / off
+  /fa engine [e] speech engine: ${Object.keys(ENGINES).join(' · ')} (google = Gemini 3.5 Transcribe, key in ~/.config/gemini/key)
   /fa mic [n]   list / choose the microphone
   /fa terms     your word list for recognition (one per line, or "persian = english")
+  /fa forget w  remove a word that the plugin learned by mistake
 Modes:
 ${MODE_ORDER.map(m => `  ${m.padEnd(8)} ${MODES[m].about}`).join('\n')}
 Tip: speak in short, complete sentences. Agents follow spoken-formal input better than casual speech.`
@@ -799,7 +826,7 @@ async function termsCommand($: EngineInterface) {
   const [mine, learned] = await Promise.all([readTerms($), learnedTerms($)])
   return `Word list: ${(await paths($)).terms}\n  ${mine.words.length} words, ${mine.pairs.length} translations; ${learned.length} learned from your edits${
     learned.length ? `: ${learned.slice(0, 12).join(', ')}` : ''
-  }\nThe project's file names, name and branch are added by themselves.`
+  }\nProject words: .persian-voice-terms.txt in the project folder (same format).\nThe project's file names, name and branch are added by themselves.`
 }
 
 // ---------- Settings dialog (/fa, or ⚙ in the band) ----------
@@ -814,7 +841,7 @@ async function openSettings($: EngineInterface) {
   micOptions = [{ value: 'default', label: 'System default' }, ...mics.map(([n, name]) => ({ value: n, label: name }))]
   wordsInfo = `${mine.words.length} words, ${mine.pairs.length} translations, ${learned.length} learned · ${p.terms.replace(p.home, '~')}`
   await applyPrefs($, await loadPrefs($))
-  return $.ui.open({ id: SETTINGS, title: 'Persian Voice · settings', focus: true, closeOnEscape: true, rows: 22 })
+  return $.ui.open({ id: SETTINGS, title: 'Persian Voice · settings', focus: true, closeOnEscape: true, rows: 24 })
 }
 
 async function shortcutFromDialog($: EngineInterface, value: string) {
@@ -946,10 +973,23 @@ export const register: Register = on => {
       background(() => $.prompt.fill({ text: d.en || d.fa || '', mode: 'insert' }))
       return { text: `↩ Your last recording (also put in the prompt box):\n\n${d.fa ?? ''}\n\n→ ${d.en || '(no translation)'}` }
     }
+    if (sub === 'engine') {
+      if (arg && !(arg in ENGINES)) return { text: `Unknown engine "${arg}". Engines: ${Object.keys(ENGINES).join(', ')}` }
+      const cur = (await loadPrefs($)).engine
+      const p = await savePrefs($, { engine: (arg as Engine | undefined) ?? (cur === 'soniox' ? 'google' : 'soniox') })
+      return { text: `🎙 Speech engine: ${ENGINES[p.engine]}` }
+    }
     if (sub === 'key') return { text: await keyCommand($, rest) }
     if (sub === 'space') return { text: await spaceCommand($, rest) }
     if (sub === 'mic') return { text: await micCommand($, arg) }
     if (sub === 'terms') return { text: await termsCommand($) }
+    if (sub === 'forget') {
+      const learned = await learnedTerms($)
+      if (!arg || !learned.includes(arg)) return { text: `Not a learned word: "${arg ?? ''}". Learned: ${learned.join(', ') || '(none)'}` }
+      await $.store.set('learned', learned.filter(w => w !== arg))
+      void refreshContext($)
+      return { text: `Forgot "${arg}".` }
+    }
     return { text: sub === 'help' ? HELP : `Unknown: /fa ${sub}\n\n${HELP}` }
   })
 
@@ -969,9 +1009,7 @@ export const register: Register = on => {
             {p.holdSpace && <Text color={RED}>🎙</Text>}
             {p.holdSpace && <Text dimColor>Hold space to talk</Text>}
             {/* With a shortcut, its chord presses this Button from the prompt (the Button must be drawn). */}
-            {(p.shortcut || !p.holdSpace) && (
-              <Button key="talk" label={p.shortcut ? `🎙 Talk (${p.shortcut})` : '🎙 Talk'} action={ACTION} onPress={() => press($)} />
-            )}
+            <Button key="talk" label={p.shortcut ? `🎙 Talk (${p.shortcut})` : '🎙 Talk'} action={ACTION} onPress={() => press($)} />
             <Button key="mode" label={`✨ ${MODES[p.mode].label}`} onPress={() => setMode($)} />
             <Button key="send" label={p.autoSend ? '⏎ Auto-send' : '⏎ Manual send'} onPress={() => savePrefs($, { autoSend: !p.autoSend })} />
             <Button key="settings" label="⚙ Settings" onPress={() => openSettings($)} />
@@ -1014,12 +1052,10 @@ export const register: Register = on => {
         {/* Drawn while a key is held too: the shortcut's repeats, or held Space's `space space` chord,
             reach press() through this Button. */}
         <Box gap={2}>
-          {phase === 'rec' &&
-            (byKey ? (
-              <Button key="stop" label={p.shortcut ? `⏹ Stop (${p.shortcut})` : '⏹ Stop'} action={ACTION} onPress={() => press($)} />
-            ) : (
-              <Button key="hold" label="🎙" plain action={ACTION} onPress={() => press($)} />
-            ))}
+          {/* Not a visible choice: the shortcut and held Space press this Button through ACTION. */}
+          {phase === 'rec' && (!byKey || p.shortcut) && <Button key="hold" label="🎙" plain action={ACTION} onPress={() => press($)} />}
+          {/* Finish and send in one click, whatever the auto-send setting says (JEV's hold-back still applies). */}
+          {phase === 'rec' && <Button key="sendnow" label="⏎ Send" onPress={() => { sendNow = true; isStopping = true }} />}
           {/* In every phase: until the text is in the box (or sent), a click discards it. */}
           <Button key="cancel" label="✕ Cancel" onPress={() => abort($)} />
         </Box>
@@ -1076,6 +1112,15 @@ export const register: Register = on => {
         </Box>
 
         <Box marginTop={1}><Text bold color={ORANGE}>Microphone and words</Text></Box>
+        <Box gap={1}>
+          <Box width={LABEL}><Text>Speech engine</Text></Box>
+          <Select
+            key="engine"
+            options={Object.entries(ENGINES).map(([value, label]) => ({ value, label }))}
+            value={p.engine}
+            onSelect={v => savePrefs($, { engine: v as Engine })}
+          />
+        </Box>
         <Box gap={1}>
           <Box width={LABEL}><Text>Microphone</Text></Box>
           <Select key="mic" options={micOptions} value={p.mic} onSelect={v => savePrefs($, { mic: v })} />

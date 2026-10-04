@@ -213,6 +213,9 @@ test('JEV: a rewrite that adds, changes or drops something is not used', () => {
 test('learning: technical words added while editing the dictated text', () => {
   expect(newTerms('Fix the parse order function', 'Fix the parseOrder function in auth.ts')).toEqual(['parseOrder', 'auth.ts'])
   expect(newTerms('Fix the test', 'Something totally different with fooBar')).toEqual([]) // not an edit
+  expect(newTerms('Use the STE rules here', 'Use the STE rules here and C3')).toEqual([]) // an addition, not a correction
+  expect(newTerms('Use the see three module', 'Use the STE module')).toEqual([]) // an acronym is not learned
+  expect(newTerms('Use the see three module', 'Use the C3 module')).toEqual(['C3'])
 })
 
 test('hold space mid-text: stray space removed, short request filled without the model', async ($, on) => {

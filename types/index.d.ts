@@ -4,8 +4,12 @@ export type Live = { fa: string; en: string; lvl?: number; ms?: number; done?: b
 /** How the English is cleaned up before it goes into the prompt box. */
 export type Mode = 'auto' | 'exact' | 'prompt' | 'chat' | 'spec' | 'commit'
 
+/** Who recognizes the speech. Soniox also translates; Google only transcribes, so Claude translates. */
+export type Engine = 'soniox' | 'google'
+
 /** The person's settings, global ($.store). */
 export type Prefs = {
+  engine: Engine
   mode: Mode
   autoSend: boolean
   mic: string
