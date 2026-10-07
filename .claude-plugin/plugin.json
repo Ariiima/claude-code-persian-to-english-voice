@@ -1,7 +1,7 @@
 {
   "name": "persian-voice",
   "version": "1.2.0",
-  "description": "Hold Space to speak Persian (or English); a live English translation goes into the Claude Code prompt box",
+  "description": "Speak Persian, Claude Code gets English. Hold Space, talk in Persian, English or both, and a clean English prompt appears in the prompt box",
   "author": { "name": "Ariiima", "url": "https://github.com/Ariiima" },
   "homepage": "https://github.com/Ariiima/claude-code-persian-to-english-voice",
   "repository": "https://github.com/Ariiima/claude-code-persian-to-english-voice",

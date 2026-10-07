@@ -1,15 +1,19 @@
-# Persian Voice for Claude Code
+<div align="center">
 
-Hold <kbd>Space</kbd>, speak Persian (or English, or both), and release.
-A clean English prompt appears in the Claude Code prompt box.
+# 🎙️ Persian Voice for Claude Code
 
-> **This is a mod, not a plugin.** It is a [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview): code that runs inside Claude Code and hooks into its events and interface. A plain plugin cannot catch the Space key or draw the live view.
+### Speak Persian. Claude Code gets English.
 
-Persian Voice is a [Claude Code](https://claude.com/claude-code) mod.
-It streams your microphone to [Soniox](https://soniox.com) for live speech recognition and translation.
-The prompt arrives in English, so the model understands it better and gives a better answer than it does for Persian alone.
-While you speak, you see your words and their English translation above the prompt.
-When you release the key, you can improve the text: Claude rewrites it into a clear prompt. This is optional, and you choose how (see [Modes](#modes)).
+<p dir="rtl">فارسی حرف بزنید، Claude Code پرامپت انگلیسی می‌گیرد.</p>
+
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+[![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-d97757.svg)](https://code.claude.com/docs/en/plugins/mods/overview)
+
+**Hold <kbd>Space</kbd> → say it in Persian, English, or both → release.**<br>
+A clean English prompt is waiting in your prompt box.
+
+</div>
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
@@ -19,128 +23,137 @@ When you release the key, you can improve the text: Claude rewrites it into a cl
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
+## You say it. Claude gets this.
+
+| You say | Claude Code receives |
+| --- | --- |
+| تست‌ها رو اجرا کن و اونایی که خراب شدن رو درست کن | Run the tests and fix the ones that fail. |
+| این `parseOrder` توی `auth.ts` وقتی order خالیه کرش می‌کنه، درستش کن | Fix the crash in `parseOrder` in `auth.ts` when the order is empty. |
+| اممم… همون باگی که قبلاً گفتم رو درست کن | Fix the null check in `parseOrder` in `auth.ts`. *(in `chat` mode, it reads the conversation)* |
+
+## Why
+
+- **You think faster in your own language.** Say the idea the way it comes to you. Mix Persian and English as you do at work.
+- **Claude works best in English.** The prompt arrives in English, so you get better answers than with Persian text.
+- **No more Persian in the terminal.** No keyboard switching, no right-to-left text that jumps around, no Finglish.
+- **Code names come out right.** It knows your project's files and names, so `auth.ts` and `parseOrder` are spelled correctly.
+- **It cleans up after you.** "Um", "the the" and self-corrections go away. When you ramble, Claude rewrites it into a clear prompt, and never adds requests you did not say.
+
+## Quick start (macOS, about 2 minutes)
+
+You need [Claude Code](https://claude.com/claude-code), Python 3.10+, [Homebrew](https://brew.sh) and a [Soniox](https://soniox.com) API key.
+
+```sh
+# 1. Get the mod and its one Python dependency
+git clone https://github.com/Ariiima/claude-code-persian-to-english-voice.git ~/.claude/persian-voice
+cd ~/.claude/persian-voice
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+brew install ffmpeg
+
+# 2. Save your Soniox key (or set SONIOX_API_KEY)
+mkdir -p ~/.config/soniox
+printf '%s' 'YOUR_SONIOX_API_KEY' > ~/.config/soniox/key && chmod 600 ~/.config/soniox/key
+
+# 3. Start Claude Code with the mod
+claude --plugin-dir ~/.claude/persian-voice
+```
+
+In Claude Code, run `/voice off` once (the built-in dictation also uses <kbd>Space</kbd>). Then hold <kbd>Space</kbd> and talk. The first time, macOS asks for microphone access for your terminal. Allow it.
+
+To load the mod in every session, add it to `~/.claude/settings.json` (use your own home path):
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/Users/YOU/.claude/persian-voice" } }
+```
+
+## Cheat sheet
+
+| To do this | Do this |
+| --- | --- |
+| Record | Hold <kbd>Space</kbd>, speak, release |
+| Record without holding | Tap <kbd>Space</kbd> 3 times, speak, tap once |
+| Use your own shortcut | `/fa key ctrl+x v`, then press it to start and again to stop |
+| Cancel a recording | Type any letter, or click **✕ Cancel** |
+| Get back what you said | `/fa last` |
+| Change the cleanup mode | `/fa mode`, or click **✨ mode** |
+| Send as soon as you finish | `/fa send`, or click **⏎ send** |
+| All settings | `/fa`, or click **⚙ Settings** |
+
+A single tap of <kbd>Space</kbd> still types a space.
+
 ## Features
 
-- **Hold to talk.** Hold <kbd>Space</kbd> to record. Release it to finish. This works on an empty prompt and in the middle of text.
-- **Your own shortcut.** Do not want to hold Space? Set a shortcut such as <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>V</kbd>: press it to start, press it again to stop. You can also turn hold-Space off.
-- **Live view.** A timer, a microphone level meter, your words, and the English translation update while you speak.
-- **Persian, English, or mixed.** Persian is translated to English. English stays as you said it.
-- **Knows your project.** The project name, git branch and file names go to the speech recognizer. Names like `auth.ts` and `parseOrder` come out spelled correctly.
-- **Clean prompts.** Fillers ("um", "the the") are removed at once. When the text needs more work, Claude rewrites it. You choose how (see [Modes](#modes)).
+- **Live view.** A timer, a microphone level meter, your words and the English translation update while you speak.
+- **Persian, English, or mixed.** Persian is translated. English stays as you said it.
+- **Project-aware.** The project name, git branch and file names go to the speech recognizer.
+- **Six cleanup modes.** From the plain translation (`exact`) to a full task spec (`spec`) or a git commit message (`commit`). See [Modes](#modes).
+- **A prompt for each kind of task.** A bug fix, a feature, a refactor, tests, a review and a question each get the structure that the task needs.
 - **Undo the rewrite.** A "Use plain translation" button stays for 20 seconds after a rewrite.
-- **Learns your words.** When you correct a technical word before you send, the plugin remembers it.
-- **Optional auto-send.** The prompt can be sent as soon as you finish.
+- **Learns your words.** When you correct a technical word before you send, the mod remembers it.
+- **Your words are never lost.** Every recording is saved before any other step.
+- **Optional auto-send,** with a safety stop for requests that cannot be undone (delete, force-push, deploy).
+- **Two engines.** Soniox (default, live translation) or Google Gemini (`/fa engine google`).
 
-## Requirements
+## Privacy
+
+- **Audio** goes to Soniox only while you record. Recording stops by itself after 5 minutes.
+- **Text** goes to Anthropic only when the rewrite runs, through your own Claude Code login.
+- **Text for JEV** goes to TypeSafe only when you set a JEV key. It contains your words, their translation and the last 4 messages of the chat.
+- **Your API keys** stay in `~/.config/…` or your environment. They are never written to the mod folder.
+
+---
+
+## Full guide
+
+> **Mod, not plugin.** This is a [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview): code that runs inside Claude Code and hooks into its events and interface. A plain plugin cannot catch the <kbd>Space</kbd> key or draw the live view.
+
+<details>
+<summary><b>Requirements</b></summary>
 
 | What | Why |
 | --- | --- |
 | macOS | The microphone is read through AVFoundation. |
-| Claude Code with plugin hooks (tested on v2.1.287) | The plugin runs inside Claude Code. |
+| Claude Code with plugin hooks (tested on v2.1.287) | The mod runs inside Claude Code. |
 | Python 3.10 or later | Runs the audio stream (`stt/stream.py`). |
 | [ffmpeg](https://ffmpeg.org) | Reads the microphone. |
 | A [Soniox](https://soniox.com) API key | Speech recognition and translation. |
 
-## Install
+**No Soniox account, or no money on it? Use Google, which is free.** Make a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no card), save it in `~/.config/gemini/key` (or set `GEMINI_API_KEY`), then run `/fa engine google`.
+In our test it read Persian with English code words well, but it can swap look-alike words (for example `parseOrder` became "صفات رزرو"). Add such words to your [word list](#your-word-list). The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
 
-1. Clone the repository:
+</details>
 
-   ```sh
-   git clone https://github.com/Ariiima/claude-code-persian-to-english-voice.git ~/.claude/persian-voice
-   cd ~/.claude/persian-voice
-   ```
+<details>
+<summary><b>Recording, tap mode and cancel</b></summary>
 
-2. Install the Python dependency in a virtual environment. The plugin looks for `.venv` in this folder.
+**Hold to talk**
 
-   ```sh
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
-   ```
-
-3. Install ffmpeg:
-
-   ```sh
-   brew install ffmpeg
-   ```
-
-4. Save your Soniox API key. Keep this file private.
-
-   ```sh
-   mkdir -p ~/.config/soniox
-   printf '%s' 'YOUR_SONIOX_API_KEY' > ~/.config/soniox/key
-   chmod 600 ~/.config/soniox/key
-   ```
-
-   You can also set the `SONIOX_API_KEY` environment variable instead.
-
-   To use Google instead (`/fa engine google`), save a Gemini API key the same way in `~/.config/gemini/key`, or set `GEMINI_API_KEY`. The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
-
-5. Load the plugin in Claude Code. Choose one option:
-
-   - **Every session:** add the folder to `~/.claude/settings.json`:
-
-     ```json
-     {
-       "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/Users/YOU/.claude/persian-voice" }
-     }
-     ```
-
-   - **One session:** start Claude Code with `claude --plugin-dir ~/.claude/persian-voice`.
-
-6. Turn off the built-in dictation, because it also uses <kbd>Space</kbd>. Run `/voice off` once in Claude Code.
-
-7. The first time you record, macOS asks for microphone access for your terminal. Allow it.
-
-## Use
-
-### Record
-
-1. Hold <kbd>Space</kbd>. The red **● REC** panel appears.
+1. Hold <kbd>Space</kbd>. The red **● REC** panel appears. This works on an empty prompt and in the middle of text.
 2. Speak. Your words and the English translation update live.
 3. Release <kbd>Space</kbd>. The text goes into the prompt box at the cursor.
 4. Read the text, change it if necessary, and press <kbd>Enter</kbd>.
 
-A single tap of <kbd>Space</kbd> still types a space.
+**Tap mode**
 
-To record without holding a key:
-
-1. Tap <kbd>Space</kbd> 3 times quickly. The **● REC** panel appears and shows "tap space to finish".
+1. Tap <kbd>Space</kbd> 3 times quickly. The **● REC** panel shows "tap space to finish".
 2. Speak.
-3. Tap <kbd>Space</kbd> once. The text goes into the prompt box. With auto-send on, the plugin sends it.
+3. Tap <kbd>Space</kbd> once. The text goes into the prompt box. With auto-send on, the mod sends it.
 
 Tapped keys do not repeat, so the cursor does not move while you record.
 
-To cancel a recording, for example when the translation is wrong:
+**Cancel**
 
-- Type any letter while a <kbd>Space</kbd> recording runs, or while the plugin finishes or rewrites it. The letter does not type.
+- Type any letter while a <kbd>Space</kbd> recording runs, or while the mod finishes or rewrites it. The letter does not type.
 - Or click **✕ Cancel** in the REC panel. This works for every recording.
 
-Nothing goes into the prompt box, and nothing is sent. You can start a new recording at once. `/fa last` still shows what you said.
-<kbd>Esc</kbd> cannot cancel a recording: Claude Code does not pass the <kbd>Esc</kbd> key to plugins.
+Nothing goes into the prompt box, and nothing is sent. `/fa last` still shows what you said.
+<kbd>Esc</kbd> cannot cancel a recording: Claude Code does not pass the <kbd>Esc</kbd> key to mods.
 You can also run `/fa rec` to start, and run `/fa rec` again, or press **⏹ Stop**, to finish.
 
-### Settings
+</details>
 
-Type `/fa` (or click **⚙ Settings** above the prompt) to open the settings dialog. It shows every setting and its current value, and you change them in place:
-
-```
-How to start a recording
-Hold Space         [ ● On  ]  hold Space to talk, release to finish
-Shortcut           type one, e.g. ctrl+x v, then Enter
-
-What happens to your words
-Cleanup mode       Prompt ▾
-                   Claude rewrites what you said into a clear prompt…
-Auto-send          [ ○ Off ]  goes into the prompt box; you press Enter
-
-Microphone and words
-Microphone         System default ▾
-Word list          12 words, 1 translation, 4 learned · ~/.config/persian-voice/terms.txt
-```
-
-Use <kbd>Tab</kbd> to move, <kbd>Enter</kbd> to change, and <kbd>Esc</kbd> to close. Changes are saved at once, for all projects.
-
-### Choose how to start a recording
+<details>
+<summary><b>Your own shortcut</b></summary>
 
 You can use hold-Space, your own shortcut, or both.
 
@@ -162,14 +175,35 @@ You can use hold-Space, your own shortcut, or both.
    ```
 
 To remove the shortcut, run `/fa key off`. This also turns hold-Space on again.
-
 The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the file are kept.
 
-### Commands
+</details>
+
+<details>
+<summary><b>Settings dialog and commands</b></summary>
+
+Type `/fa` (or click **⚙ Settings** above the prompt) to open the settings dialog:
+
+```
+How to start a recording
+Hold Space         [ ● On  ]  hold Space to talk, release to finish
+Shortcut           type one, e.g. ctrl+x v, then Enter
+
+What happens to your words
+Cleanup mode       Prompt ▾
+                   Claude rewrites what you said into a clear prompt…
+Auto-send          [ ○ Off ]  goes into the prompt box; you press Enter
+
+Microphone and words
+Microphone         System default ▾
+Word list          12 words, 1 translation, 4 learned · ~/.config/persian-voice/terms.txt
+```
+
+Use <kbd>Tab</kbd> to move, <kbd>Enter</kbd> to change, and <kbd>Esc</kbd> to close. Changes are saved at once, for all projects.
 
 | Command | What it does |
 | --- | --- |
-| `/fa` | Open the [settings](#settings) dialog. |
+| `/fa` | Open the settings dialog. |
 | `/fa rec` | Start or stop a recording without holding a key. |
 | `/fa last` | Show your last recording (Persian and English) and put it in the prompt box again. |
 | `/fa key [shortcut]` | Show or set your own shortcut, for example `/fa key ctrl+x v`. `/fa key off` removes it. |
@@ -178,12 +212,12 @@ The shortcut is written to `~/.claude/keybindings.json`. Other bindings in the f
 | `/fa polish` | Turn the cleanup on (`prompt`) or off (`exact`). |
 | `/fa send` | Turn auto-send on or off. |
 | `/fa mic` | List the microphones. `/fa mic 1` selects microphone 1. |
-| `/fa terms` | Show your word list and the words the plugin learned. |
+| `/fa terms` | Show your word list and the words the mod learned. |
 | `/fa help` | Show all commands. |
 
-You can also click the **✨ mode**, **⏎ send** and **⚙ Settings** buttons above the prompt.
+With auto-send on, Claude Code shows the prompt as "The persian-voice plugin sent a message". Claude Code adds this label to every prompt that a plugin sends, and a mod cannot remove it. Claude still treats the text as your request.
 
-With auto-send on, Claude Code shows the prompt as "The persian-voice plugin sent a message". Claude Code adds this label to every prompt that a plugin sends, and a plugin cannot remove it. Claude still treats the text as your request.
+</details>
 
 ### Modes
 
@@ -191,30 +225,18 @@ The mode sets what happens to your words after you stop speaking.
 
 | Mode | Shown as | Result | Uses a model |
 | --- | --- | --- | --- |
-| `auto` | Auto | Like `prompt`, but JEV can also select a spec or a commit message (see [Prompt kinds](#prompt-kinds)). Without a JEV key, it works like `prompt`. | As the selected kind |
-| `prompt` (default) | Prompt | A clear prompt in the form of the task that JEV detects: bug fix, feature, question, story analysis, and others (see [Prompt kinds](#prompt-kinds)). | Only when JEV finds a problem, and always for a story analysis. Without JEV: only for long or self-corrected requests |
-| `chat` | Prompt (reads this chat) | Like `prompt`, but Claude also reads this conversation (see below). Slower. | Yes (the session's model) |
+| `auto` | Auto | Like `prompt`, but JEV can also select a spec or a commit message. Without a JEV key, it works like `prompt`. | As the selected kind |
+| `prompt` (default) | Prompt | A clear prompt in the form of the task: bug fix, feature, question, and others. | Only when needed (see below) |
+| `chat` | Prompt (reads this chat) | Like `prompt`, but Claude also reads this conversation to replace "that bug" with the real name. Slower. | Yes |
 | `spec` | Spec | A task spec with Goal, Context, Requirements and Done when. Good for thinking aloud. | Yes |
 | `commit` | Commit msg | A git commit message. | Yes |
 | `exact` | Exact | The translation only, with fillers removed. | No |
 
-#### What "Prompt (reads this chat)" does
+In `prompt` mode, Claude rewrites only when JEV finds a problem (and always for a story analysis). Without JEV, it rewrites only long or self-corrected requests.
+The rewrite uses Claude Sonnet 5.5 at low effort, through your Claude Code login. If it takes more than 8 seconds or fails, you get the plain translation. In `chat` mode, after 8 seconds it falls back to the normal `prompt` mode.
 
-When you speak, you often refer to things from the conversation: "fix that bug", "undo the change in the file we edited".
-The normal `prompt` mode sees only your words, so these references stay vague.
-The `chat` mode also gives Claude the conversation so far. Claude uses it only to replace a vague reference with the real name. It does not add new requests.
-
-| You say | `prompt` gives | `chat` gives |
-| --- | --- | --- |
-| "um, fix that bug from before" | Fix that bug from before. | Fix the null check in `parseOrder` in `auth.ts`. |
-
-Use `chat` when you talk about earlier work. It is slower, because Claude reads the whole conversation. If it takes more than 8 seconds, the plugin uses the normal `prompt` mode instead.
-
-The rewrite uses Claude Sonnet 5.5 at low effort, through your Claude Code login.
-If the rewrite takes more than 8 seconds or fails, the plain translation is used.
-The rewrite never adds requirements that you did not say.
-
-#### Prompt kinds
+<details>
+<summary><b>Prompt kinds</b></summary>
 
 Each type of task needs different information. For example, a bug fix needs the symptom, the location and what "fixed" looks like.
 So the rewrite uses a different prompt for each type of task. With a JEV key, JEV selects the prompt for each recording. Without a key, the rewrite uses the general prompt.
@@ -235,18 +257,21 @@ So the rewrite uses a different prompt for each type of task. With a JEV key, JE
 Each prompt includes only the parts that you said. The only addition is the role sentence of the story editor.
 The prompts follow [Anthropic's prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the [Claude Code best practices](https://code.claude.com/docs/en/best-practices). They are in `hooks/prompts.ts`.
 
-### JEV checks (optional)
+</details>
+
+<details>
+<summary><b>JEV checks (optional, smarter and faster)</b></summary>
 
 [JEV](https://docs.typesafe.ai) is a fast decision model from TypeSafe. It does not write text. It answers yes/no and choice questions with probabilities, in about 1 second.
-When you set a JEV key, the plugin asks JEV these questions about each recording:
+When you set a JEV key, the mod asks JEV these questions about each recording:
 
-| Check | What the plugin does |
+| Check | What the mod does |
 | --- | --- |
 | Does the text have fillers, a vague reference, rambling, or a translation error? | It runs the Claude rewrite only when the answer is yes. A clear request goes into the prompt box at once. |
 | Does the recent chat make a vague reference clear ("fix that bug")? | It rewrites in the `chat` mode, so Claude replaces the reference with the real name. |
-| Is the text a request for Claude? | When JEV is sure that it is not (for example, you talk to another person), the plugin puts the text in the prompt box, but does not rewrite it or send it. |
-| Does the request do something that you cannot undo (delete, force-push, deploy)? | With auto-send on, the plugin does not send the prompt. It puts the text in the prompt box. Press <kbd>Enter</kbd> to send it. |
-| Which kind of task is it? | It uses the rewrite prompt for that [kind](#prompt-kinds). |
+| Is the text a request for Claude? | When JEV is sure that it is not (for example, you talk to another person), the mod puts the text in the prompt box, but does not rewrite it or send it. |
+| Does the request do something that you cannot undo (delete, force-push, deploy)? | With auto-send on, the mod does not send the prompt. It puts the text in the prompt box. Press <kbd>Enter</kbd> to send it. |
+| Which kind of task is it? | It uses the rewrite prompt for that kind. |
 | After the rewrite: did Claude add, change or remove something that you said? | It asks Claude for one more rewrite and tells it the problem. If the second rewrite also has a problem, it uses your own words. |
 
 To turn on the checks, save your TypeSafe key:
@@ -258,36 +283,22 @@ chmod 600 ~/.config/typesafe/key
 ```
 
 You can also set the `JEV_API_KEY` environment variable.
-Without a key, or when JEV does not answer in 2.5 seconds, the plugin uses its old rules. You do not lose a recording.
+Without a key, or when JEV does not answer in 2.5 seconds, the mod uses its old rules. You do not lose a recording.
 
-The questions are in `hooks/jev.ts`. To test a change to them on labelled examples, run `python3 tools/jev_eval.py`.
-To test a change to the rewrite prompts, run `python3 tools/rewrite_eval.py`. It runs one dictation of each kind through Claude, with the plugin's retry, and checks the results. To compare effort levels, add `low`, `medium` or `high`. The script shows the API time of each rewrite. Both scripts need Node 22 or later.
+</details>
 
-Two more scripts measure whether a change to the prompts helps:
+<details>
+<summary><b>Your words are never lost</b></summary>
 
-| Script | What it does | Rewrites, cost at API prices |
-|---|---|---|
-| `tools/prompt_ab.py [git-ref] [repeats]` | Compares the prompts of a commit with the current prompts | 88 for 2 repeats, about $2 |
-| `tools/prompt_ablation.py [repeats] [blocks\|rules]` | Removes one part of the prompts at a time and measures the loss | `blocks`: 276 for 2 repeats, about $6. `rules`: 828, about $17 |
-
-Each rewrite costs about $0.02, because the `claude` CLI adds about 4,700 tokens of its own context to each call. With a Claude subscription, the calls count toward your plan's usage limit. Run the scripts with 1 repeat to halve the cost.
-
-The last ablation test (`blocks`, 2 repeats) showed:
-
-- **The rules block helps.** Without it, the plugin passed 48 of 84 rewrites instead of 80 of 84. Uncertain ideas became requirements, corrections were lost, and Claude sometimes answered the request.
-- **The task prompts for each kind help.** Without them, spec, commit and story rewrites failed (28 of 44 instead of 42 of 44).
-- **Examples did not help** (82 of 84 without them), so the prompts have none.
-
-### Your words are never lost
-
-The plugin keeps every recording:
-
-- It saves each recording before any other step. Run `/fa last` to see it again and to put it back in the prompt box.
+- The mod saves each recording before any other step. Run `/fa last` to see it again and to put it back in the prompt box.
 - A long recording can end before Soniox finishes the translation. Then Claude translates your Persian words. If that fails, the Persian text goes into the prompt box.
 - If the translation can miss your last words, the rewrite uses your Persian words to complete it.
 - If an auto-sent prompt is not sent, it goes back into the prompt box.
 
-## How it works
+</details>
+
+<details>
+<summary><b>How it works</b></summary>
 
 ```mermaid
 flowchart LR
@@ -304,16 +315,19 @@ flowchart LR
     G -- "Enter, or auto-send" --> I["Claude Code"]
 ```
 
-1. The plugin (`hooks/register.tsx`) watches the prompt box. A held key sends the same character many times. When spaces repeat fast, the plugin starts a recording. A shortcut is a Claude Code keybinding that presses the plugin's **Talk** button.
+1. The mod (`hooks/register.tsx`) watches the prompt box. A held key sends the same character many times. When spaces repeat fast, the mod starts a recording. A shortcut is a Claude Code keybinding that presses the mod's **Talk** button.
 2. `stt/stream.py` reads the microphone with ffmpeg and sends the audio to Soniox. It prints the live text and the microphone level 6–7 times each second.
-3. When you release the key, the plugin tells `stream.py` to stop. Soniox then confirms the last words and their translation.
-4. The plugin cleans the text. With a JEV key, JEV decides if the text needs a rewrite. Without a key, simple rules decide.
-5. If necessary, the plugin asks Claude to rewrite the text. JEV then checks that the rewrite keeps your meaning.
-6. The plugin puts the text in the prompt box.
+3. When you release the key, the mod tells `stream.py` to stop. Soniox then confirms the last words and their translation.
+4. The mod cleans the text. With a JEV key, JEV decides if the text needs a rewrite. Without a key, simple rules decide.
+5. If necessary, the mod asks Claude to rewrite the text. JEV then checks that the rewrite keeps your meaning.
+6. The mod puts the text in the prompt box.
 
-## Configuration
+</details>
 
-### Your word list
+<details>
+<summary><b>Configuration: word lists, saved settings, environment variables</b></summary>
+
+**Your word list**
 
 Add words that the recognizer gets wrong to `~/.config/persian-voice/terms.txt`. Write one word or name on each line.
 To set a translation, write `persian = english`:
@@ -326,17 +340,17 @@ useEffect
 دیپلوی = deploy
 ```
 
-For words that belong to one project, create `.persian-voice-terms.txt` in the project folder. It has the same format. The plugin reads it together with the global list, and only in that project. Commit the file to share it with your team.
+For words that belong to one project, create `.persian-voice-terms.txt` in the project folder. It has the same format. The mod reads it together with the global list, and only in that project. Commit the file to share it with your team.
 
-The plugin also adds the project name, the git branch and the project's file names by itself.
+The mod also adds the project name, the git branch and the project's file names by itself.
 
-### Where settings are saved
+**Where settings are saved**
 
-Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in Claude Code's plugin store. They apply to all projects and sessions. To change them, use the [settings dialog](#settings).
+Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in Claude Code's plugin store. They apply to all projects and sessions.
 
-### Environment variables
+**Environment variables**
 
-`stt/stream.py` reads these variables. The plugin sets most of them for you.
+`stt/stream.py` reads these variables. The mod sets most of them for you.
 
 | Variable | Meaning |
 | --- | --- |
@@ -350,36 +364,35 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | `FA_STOP` | The file that tells the stream to finish. |
 | `FA_INPUT` | An audio file to use instead of the microphone (for tests). |
 
-## Privacy
+</details>
 
-- **Audio** goes to Soniox for recognition and translation. Recording runs only while you hold <kbd>Space</kbd>, or between two presses of your shortcut or `/fa rec`. It stops by itself after 5 minutes.
-- **Text** goes to Anthropic only when the rewrite runs. It uses your own Claude Code login.
-- **Text for JEV** goes to TypeSafe only when you set a JEV key. It contains your words, their translation and the last 4 messages of the chat.
-- **Your API keys** stay in `~/.config/soniox/key`, `~/.config/typesafe/key` or your environment. They are never written to this folder.
-
-## Troubleshooting
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 | Problem | Solution |
 | --- | --- |
 | A warning says the built-in `/voice` is on | Run `/voice off` once. Each `/voice` command toggles it. |
 | "Voice: nothing heard" | Check the microphone with `/fa mic`. Check that your terminal has microphone access in System Settings → Privacy & Security → Microphone. |
-| "No key: set SONIOX_API_KEY …" | Do step 4 of [Install](#install). |
-| Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the plugin folder. |
-| The cursor moves back and forth at the start of a hold | Claude Code draws each key before a plugin can remove it. When a hold starts, the plugin adds the chord `space space` to `~/.claude/keybindings.json`. Then Claude Code takes the held <kbd>Space</kbd> itself, and the cursor stops. Claude Code reads the changed file after about 2 seconds, so the first 2 seconds of a hold still flicker. The plugin removes the chord when you release <kbd>Space</kbd>. To avoid the flicker completely, [use a shortcut](#choose-how-to-start-a-recording) and run `/fa space off`. |
+| "No key: set SONIOX_API_KEY …" | Save your key (step 2 of [Quick start](#quick-start-macos-about-2-minutes)). |
+| Recording does not start | Start the recording on an empty prompt, or press <kbd>Space</kbd> twice quickly in text. Make sure `.venv` exists in the mod folder. |
+| The cursor moves back and forth at the start of a hold | Claude Code draws each key before a mod can remove it. When a hold starts, the mod adds the chord `space space` to `~/.claude/keybindings.json`. Then Claude Code takes the held <kbd>Space</kbd> itself, and the cursor stops. Claude Code reads the changed file after about 2 seconds, so the first 2 seconds of a hold still flicker. The mod removes the chord when you release <kbd>Space</kbd>. To avoid the flicker completely, [use a shortcut](#cheat-sheet) and run `/fa space off`. |
 | A key that you type right after a recording does not appear | After a hold, Claude Code can still wait for the second key of the `space space` chord for up to about 3 seconds, and it drops the next key. Wait until the text is in the prompt box, then type. |
-| <kbd>Space</kbd> does not type in the prompt box | The `space space` chord stayed in `~/.claude/keybindings.json` (for example, after a crash). The plugin removes it when a session starts. To remove it now, run `/reload-plugins`, or delete the `"space space"` line from the file. |
+| <kbd>Space</kbd> does not type in the prompt box | The `space space` chord stayed in `~/.claude/keybindings.json` (for example, after a crash). The mod removes it when a session starts. To remove it now, run `/reload-plugins`, or delete the `"space space"` line from the file. |
 | The shortcut does nothing | Run `/fa key` to see it. Check that no other binding in `~/.claude/keybindings.json` uses the same keys. |
 | "This does not look like a request for Claude" | JEV decided that you did not talk to Claude. Your text is in the prompt box. Press <kbd>Enter</kbd> to send it, or delete it. |
 | "The translation did not finish" | The recording was long, and Soniox did not finish in time. Claude translated your words instead. Run `/fa last` to see the Persian text. |
 | You cannot find what you said | Run `/fa last`. |
 | "Not sent: this asks for something that cannot be undone" | JEV found a risky request while auto-send is on. Check the text in the prompt box, then press <kbd>Enter</kbd>. |
 
-## Development
+</details>
+
+<details>
+<summary><b>Development and prompt evals</b></summary>
 
 ```text
-.claude-plugin/plugin.json   plugin manifest
+.claude-plugin/plugin.json   manifest
 hooks/hooks.json             loads the hooks module
-hooks/register.tsx           the plugin: hold detection, live view, cleanup, commands
+hooks/register.tsx           the mod: hold detection, live view, cleanup, commands
 hooks/register.test.ts       tests
 hooks/jev.ts                 the JEV questions
 hooks/prompts.ts             the rewrite prompts, one for each kind of task
@@ -387,12 +400,12 @@ tools/jev_eval.py            scores the JEV questions on labelled examples (live
 tools/rewrite_eval.py        runs the rewrite prompts through Claude and checks the results
 tools/prompt_ab.py           compares the prompts of a commit with the current prompts
 tools/prompt_ablation.py     removes one part of the prompts at a time and measures the loss
-types/index.d.ts             types of the plugin's shared state
+types/index.d.ts             types of the mod's shared state
 stt/stream.py                microphone → Soniox stream
 requirements.txt             Python dependency
 ```
 
-Run the checks from the plugin folder. Claude Code writes the type definitions to `.claude-plugin/types/` when it loads the plugin, so load it once before you type-check.
+Run the checks from the mod folder. Claude Code writes the type definitions to `.claude-plugin/types/` when it loads the mod, so load it once before you type-check.
 
 ```sh
 claude plugin validate .    # manifest and hooks
@@ -409,6 +422,32 @@ FA_INPUT=/tmp/test.aiff .venv/bin/python stt/stream.py
 
 It prints the live lines, then a last line with `"done": true` at the end of the file.
 
-## License
+**Prompt evals**
+
+To test a change to the JEV questions on labelled examples, run `python3 tools/jev_eval.py`.
+To test a change to the rewrite prompts, run `python3 tools/rewrite_eval.py`. It runs one dictation of each kind through Claude, with the mod's retry, and checks the results. To compare effort levels, add `low`, `medium` or `high`. Both scripts need Node 22 or later.
+
+| Script | What it does | Rewrites, cost at API prices |
+|---|---|---|
+| `tools/prompt_ab.py [git-ref] [repeats]` | Compares the prompts of a commit with the current prompts | 88 for 2 repeats, about $2 |
+| `tools/prompt_ablation.py [repeats] [blocks\|rules]` | Removes one part of the prompts at a time and measures the loss | `blocks`: 276 for 2 repeats, about $6. `rules`: 828, about $17 |
+
+Each rewrite costs about $0.02, because the `claude` CLI adds about 4,700 tokens of its own context to each call. With a Claude subscription, the calls count toward your plan's usage limit. Run the scripts with 1 repeat to halve the cost.
+
+The last ablation test (`blocks`, 2 repeats) showed:
+
+- **The rules block helps.** Without it, the mod passed 48 of 84 rewrites instead of 80 of 84. Uncertain ideas became requirements, corrections were lost, and Claude sometimes answered the request.
+- **The task prompts for each kind help.** Without them, spec, commit and story rewrites failed (28 of 44 instead of 42 of 44).
+- **Examples did not help** (82 of 84 without them), so the prompts have none.
+
+</details>
+
+---
+
+<div align="center">
+
+**If this saved you one keyboard switch, give it a ⭐ and send it to a Persian-speaking developer.**
 
 [MIT](LICENSE)
+
+</div>
