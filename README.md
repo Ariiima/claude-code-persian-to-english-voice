@@ -41,24 +41,24 @@ A clean English prompt is waiting in your prompt box.
 
 ## Quick start (macOS, about 2 minutes)
 
-You need [Claude Code](https://claude.com/claude-code), Python 3.10+, [Homebrew](https://brew.sh) and a [Soniox](https://soniox.com) API key.
+**It is free. You need no account and no API key.** Speech recognition runs on your Mac with Whisper. You need [Claude Code](https://claude.com/claude-code), a Mac with Apple Silicon, Python 3.10+ and [Homebrew](https://brew.sh).
 
 ```sh
-# 1. Get the mod and its one Python dependency
+# 1. Get the mod and the free local speech engine
 git clone https://github.com/Ariiima/claude-code-persian-to-english-voice.git ~/.claude/persian-voice
 cd ~/.claude/persian-voice
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements-local.txt
 brew install ffmpeg
 
-# 2. Save your Soniox key (or set SONIOX_API_KEY)
-mkdir -p ~/.config/soniox
-printf '%s' 'YOUR_SONIOX_API_KEY' > ~/.config/soniox/key && chmod 600 ~/.config/soniox/key
-
-# 3. Start Claude Code with the mod
+# 2. Start Claude Code with the mod
 claude --plugin-dir ~/.claude/persian-voice
 ```
 
-In Claude Code, run `/voice off` once (the built-in dictation also uses <kbd>Space</kbd>). Then hold <kbd>Space</kbd> and talk. The first time, macOS asks for microphone access for your terminal. Allow it.
+In Claude Code, run `/voice off` once (the built-in dictation also uses <kbd>Space</kbd>), then run `/fa engine local`. Hold <kbd>Space</kbd> and talk. The first time, macOS asks for microphone access for your terminal. Allow it.
+
+The first recording downloads a 1.6 GB model, so it takes a while. After that it works offline, and a short recording is read in about 1 second.
+
+Want live text while you speak, or a faster first start? See the other [speech engines](#speech-engines).
 
 To load the mod in every session, add it to `~/.claude/settings.json` (use your own home path):
 
@@ -92,7 +92,20 @@ A single tap of <kbd>Space</kbd> still types a space.
 - **Learns your words.** When you correct a technical word before you send, the mod remembers it.
 - **Your words are never lost.** Every recording is saved before any other step.
 - **Optional auto-send,** with a safety stop for requests that cannot be undone (delete, force-push, deploy).
-- **Three engines.** Soniox (default, live translation), Google Gemini (`/fa engine google`, free key), or Whisper on your Mac (`/fa engine local`, free, no key, no internet). Only Soniox shows live text; the other two show a level meter and the text appears after you release.
+- **Free by default.** Whisper runs on your Mac: no key, no account, no internet. Google Gemini (free key) and Soniox (paid, live text) are options. See [Speech engines](#speech-engines).
+
+## Speech engines
+
+Change the engine with `/fa engine local`, `/fa engine google` or `/fa engine soniox`, or in `/fa` settings.
+
+| Engine | Cost | Key | Live text | Internet | Status |
+| --- | --- | --- | --- | --- | --- |
+| **Local Whisper** (recommended) | Free | None | No, text appears after you release | Only for the first model download | Built in. Tested on Persian, English and mixed speech. |
+| **Google Gemini** | Free key, no card: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Yes | No, text appears after you release | Yes | Built in. Tested. Save the key in `~/.config/gemini/key`. |
+| **Soniox** | Paid | Yes | Yes, with live English translation | Yes | Built in. Save the key in `~/.config/soniox/key`. |
+| **Groq Whisper** | Free key, no card, with daily limits | Yes | No | Yes | Not built in yet. Groq did not answer from Iran when we tried, so we could not test it. |
+
+Local Whisper and Gemini only transcribe. Claude makes the English draft from the transcript. In our test both read Persian with English code words well, and both can swap look-alike words (for example `parseOrder`). Add such words to your [word list](#your-word-list).
 
 ## Privacy
 
@@ -116,12 +129,10 @@ A single tap of <kbd>Space</kbd> still types a space.
 | Claude Code with plugin hooks (tested on v2.1.287) | The mod runs inside Claude Code. |
 | Python 3.10 or later | Runs the audio stream (`stt/stream.py`). |
 | [ffmpeg](https://ffmpeg.org) | Reads the microphone. |
-| A [Soniox](https://soniox.com) API key | Speech recognition and translation. |
+| Apple Silicon Mac | Only for the local Whisper engine. Google and Soniox work on any Mac. |
+| A speech engine | Local Whisper needs no key. Google needs a free [Gemini key](https://aistudio.google.com/apikey). Soniox needs a paid [Soniox](https://soniox.com) key. See [Speech engines](#speech-engines). |
 
-**No Soniox account, or no money on it? Use Google, which is free.** Make a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no card), save it in `~/.config/gemini/key` (or set `GEMINI_API_KEY`), then run `/fa engine google`.
-In our test it read Persian with English code words well, but it can swap look-alike words (for example `parseOrder` became "صفات رزرو"). Add such words to your [word list](#your-word-list).
-
-**No key at all? Use Whisper on your Mac (Apple Silicon).** Run `.venv/bin/pip install -r requirements-local.txt`, then `/fa engine local`. The first recording downloads a 1.6 GB model, which can take a long time on a slow connection. After that it works offline, and a short recording is read in about 1 second. In our test it was as accurate as Gemini on Persian, and it also read English-only speech. It has no live text and no translation, so Claude makes the English draft. The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
+The Google engine is `gemini-3.5-transcribe-live`. Soniox translates by itself.
 
 </details>
 
