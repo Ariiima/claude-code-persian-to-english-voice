@@ -96,7 +96,7 @@ A single tap of <kbd>Space</kbd> still types a space.
 
 ## Privacy
 
-- **Audio** goes to Soniox only while you record. Recording stops by itself after 5 minutes.
+- **Audio** goes to Soniox (or to Google with `/fa engine google`) only while you record. With `/fa engine local`, audio never leaves your Mac. Recording stops by itself after 5 minutes.
 - **Text** goes to Anthropic only when the rewrite runs, through your own Claude Code login.
 - **Text for JEV** goes to TypeSafe only when you set a JEV key. It contains your words, their translation and the last 4 messages of the chat.
 - **Your API keys** stay in `~/.config/…` or your environment. They are never written to the mod folder.
