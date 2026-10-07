@@ -41,7 +41,9 @@ A clean English prompt is waiting in your prompt box.
 
 ## Quick start (macOS, about 2 minutes)
 
-**It is free. You need no account and no API key.** Speech recognition runs on your Mac with Whisper. You need [Claude Code](https://claude.com/claude-code), a Mac with Apple Silicon, Python 3.10+ and [Homebrew](https://brew.sh).
+**It is free. You need no account and no API key.** Speech recognition runs on your Mac with Whisper. You need [Claude Code](https://claude.com/claude-code), a Mac, Python 3.10+ and [Homebrew](https://brew.sh). On Apple Silicon the install below uses `mlx-whisper`. On an Intel Mac it uses `faster-whisper` on the CPU.
+
+**Windows or a gaming laptop?** The same `requirements-local.txt` installs `faster-whisper`, which uses an NVIDIA GPU when CUDA 12 and cuDNN 9 are installed (`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` is the easy way), and the CPU if not. The speech engine is ready, but the rest of the mod is not: it reads the microphone with macOS AVFoundation and uses macOS paths. **Windows is not supported yet and is untested.** See [Speech engines](#speech-engines).
 
 ```sh
 # 1. Get the mod and the free local speech engine
@@ -100,7 +102,7 @@ Change the engine with `/fa engine local`, `/fa engine google` or `/fa engine so
 
 | Engine | Cost | Key | Live text | Internet | Status |
 | --- | --- | --- | --- | --- | --- |
-| **Local Whisper** (recommended) | Free | None | No, text appears after you release | Only for the first model download | Built in. Tested on Persian, English and mixed speech. |
+| **Local Whisper** (recommended) | Free | None | No, text appears after you release | Only for the first model download | Built in. Tested on Persian, English and mixed speech on Apple Silicon (`mlx-whisper`). The `faster-whisper` version for Intel, Windows and NVIDIA GPUs runs on the CPU in our test; the GPU is untested. |
 | **Google Gemini** | Free key, no card: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Yes | No, text appears after you release | Yes | Built in. Tested. Save the key in `~/.config/gemini/key`. |
 | **Soniox** | Paid | Yes | Yes, with live English translation | Yes | Built in. Save the key in `~/.config/soniox/key`. |
 | **Groq Whisper** | Free key, no card, with daily limits | Yes | No | Yes | Not built in yet. Groq did not answer from Iran when we tried, so we could not test it. |
@@ -129,7 +131,7 @@ Local Whisper and Gemini only transcribe. Claude makes the English draft from th
 | Claude Code with plugin hooks (tested on v2.1.287) | The mod runs inside Claude Code. |
 | Python 3.10 or later | Runs the audio stream (`stt/stream.py`). |
 | [ffmpeg](https://ffmpeg.org) | Reads the microphone. |
-| Apple Silicon Mac | Only for the local Whisper engine. Google and Soniox work on any Mac. |
+| Apple Silicon Mac | Best for the local Whisper engine. An Intel Mac works too, on the CPU, and is slower. |
 | A speech engine | Local Whisper needs no key. Google needs a free [Gemini key](https://aistudio.google.com/apikey). Soniox needs a paid [Soniox](https://soniox.com) key. See [Speech engines](#speech-engines). |
 
 The Google engine is `gemini-3.5-transcribe-live`. Soniox translates by itself.
@@ -369,7 +371,7 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | --- | --- |
 | `SONIOX_API_KEY` | The Soniox key. If it is not set, the key is read from `~/.config/soniox/key`. |
 | `FA_ENGINE` | `soniox` (default), `google` or `local`. |
-| `FA_LOCAL_MODEL` | The Whisper model for `local`. Default `mlx-community/whisper-large-v3-turbo`. `mlx-community/whisper-small-mlx` is faster but makes many mistakes in Persian. |
+| `FA_LOCAL_MODEL` | The Whisper model for `local`. Default on Apple Silicon: `mlx-community/whisper-large-v3-turbo`. Default elsewhere (`faster-whisper`): `large-v3-turbo`. Smaller models (`mlx-community/whisper-small-mlx`, `small`) are faster but make many mistakes in Persian. |
 | `FA_LOCAL_LANG` | A language code for `local`, for example `fa`. Default: detect it. Forcing `fa` turned English-only speech into garbage in tests. |
 | `GEMINI_API_KEY` | The Gemini key for `google`. If it is not set, the key is read from `~/.config/gemini/key`. |
 | `FA_GEMINI_MODEL` | The Gemini model. Default `gemini-3.5-transcribe-live`. |

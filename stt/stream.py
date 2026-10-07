@@ -153,23 +153,31 @@ async def google(ff, final, live, lvl):
         await asyncio.gather(send(), recv())
 
 
-LOCAL_MODEL = os.environ.get("FA_LOCAL_MODEL", "mlx-community/whisper-large-v3-turbo")
+def local_runner(model, langs, prompt):
+    """A function audio -> text. mlx-whisper on Apple Silicon (model in $FA_LOCAL_MODEL, default below), else
+    faster-whisper (NVIDIA GPU if CUDA works, else CPU int8; $FA_LOCAL_MODEL default large-v3-turbo)."""
+    try:
+        import mlx_whisper
+    except ImportError:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            sys.exit("Local engine not installed: run .venv/bin/pip install -r requirements-local.txt")
+        wm = WhisperModel(model or "large-v3-turbo", device="auto", compute_type="auto")
+        return lambda audio: "".join(s.text for s in wm.transcribe(
+            audio, language=langs, initial_prompt=prompt, condition_on_previous_text=False)[0]).strip()
+    return lambda audio: mlx_whisper.transcribe(
+        audio, path_or_hf_repo=model or "mlx-community/whisper-large-v3-turbo", language=langs,
+        initial_prompt=prompt, condition_on_previous_text=False)["text"].strip()
 
 
 async def local(ff, final, live, lvl):
-    """Whisper on this Mac (mlx-whisper): free, offline, no key. It does not stream: the text arrives after Stop
+    """Whisper on this computer: free, offline, no key. It does not stream: the text arrives after Stop
     ("en" stays empty and the plugin has Claude translate it). The first run downloads the model (~1.6 GB)."""
-    try:
-        import numpy as np
-        import mlx_whisper
-    except ImportError:
-        sys.exit("Local engine not installed: run .venv/bin/pip install -r requirements-local.txt")
+    import numpy as np
     terms = json.loads(os.environ.get("FA_CONTEXT") or "{}").get("terms", [])[:100]
     # Auto-detect by default: "fa" forced turned English-only speech into garbage (measured on 4 clips).
-    langs = os.environ.get("FA_LOCAL_LANG") or None
-    run = lambda audio: mlx_whisper.transcribe(
-        audio, path_or_hf_repo=LOCAL_MODEL, language=langs, initial_prompt=", ".join(terms) or None,
-        condition_on_previous_text=False)["text"].strip()
+    run = local_runner(os.environ.get("FA_LOCAL_MODEL"), os.environ.get("FA_LOCAL_LANG") or None, ", ".join(terms) or None)
     warm = asyncio.create_task(asyncio.to_thread(run, np.zeros(RATE, np.float32)))  # loads the model while you talk
     pcm = bytearray()
     while chunk := await ff.stdout.read(CHUNK):
