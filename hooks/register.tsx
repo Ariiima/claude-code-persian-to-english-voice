@@ -30,6 +30,7 @@ async function paths($: EngineInterface): Promise<Paths> {
 const HOLD_GAP_MS = 1000 // a 2nd press within this of the 1st is a repeat, not a tap (covers the OS repeat delay)
 const RELEASE_MS = 700 // no repeat for this long = released
 const FINISH_MS = 5000 // after Stop, wait this long at most for Soniox to finalize the translation
+const LOCAL_FINISH_MS = 120000 // local Whisper reads the whole recording after Stop (and downloads its model on the first run)
 const MAX_MS = 5 * 60_000 // a forgotten tap-mode session stops by itself
 const UNDO_MS = 20_000 // how long "Use plain translation" stays
 const LAST = 'lastDictation' // store key: the last recording's words, for /fa last
@@ -67,7 +68,7 @@ const MODES: Record<Mode, { label: string; about: string }> = {
 const MODE_ORDER: Mode[] = ['auto', 'prompt', 'chat', 'spec', 'commit', 'exact']
 
 // Who recognizes the speech. Soniox also translates; Gemini only transcribes, so Claude makes the English.
-const ENGINES: Record<Engine, string> = { soniox: 'Soniox', google: 'Google (Gemini 3.5 Transcribe)' }
+const ENGINES: Record<Engine, string> = { soniox: 'Soniox', google: 'Google (Gemini 3.5 Transcribe)', local: 'Local Whisper (free, offline)' }
 
 // The rewrite prompts per task kind live in prompts.ts (tools/rewrite_eval.py runs that same object).
 // JEV's `kind` question (jev.ts) picks one; its options are these names.
@@ -597,6 +598,7 @@ async function start($: EngineInterface) {
   if (!isTentative) await update($, live, () => ({ fa: '', en: '', ms: 0 }))
   const p = await paths($)
   const pref = await read($, prefs)
+  const finishMs = pref.engine === 'local' ? LOCAL_FINISH_MS : FINISH_MS
   const env: Record<string, string> = { PATH, HOME: p.home, FA_STOP: STOP, FA_MIC: pref.mic, FA_ENGINE: pref.engine }
   if (context) env.FA_CONTEXT = context.json
   if (pref.engine === 'google') {
@@ -622,7 +624,7 @@ async function start($: EngineInterface) {
         if (isCancelled || (isTentative && now - lastPress > HOLD_GAP_MS)) {
           isCancelled = true // start() then drops the text
           await $.fs.write(STOP, '') // stream.py exits by itself...
-          await $.clock.sleep(FINISH_MS)
+          await $.clock.sleep(finishMs)
           if (isRunning) await proc.return({ code: null, signal: null }) // ...or is killed
           return
         }
@@ -638,7 +640,7 @@ async function start($: EngineInterface) {
           await redraw($)
           await $.fs.write(STOP, '') // stream.py closes the mic, waits for the last words, then exits
         }
-        if (stopAt !== null && now - stopAt > FINISH_MS) {
+        if (stopAt !== null && now - stopAt > finishMs) {
           await proc.return({ code: null, signal: null }) // kills stream.py
           return
         }
@@ -692,7 +694,7 @@ async function start($: EngineInterface) {
     }
     const p = await loadPrefs($)
     // Gemini only transcribes: Claude makes the English draft, then the normal JEV / rewrite steps run on it.
-    if (!raw && p.engine === 'google') raw = await spinning($, 'Translating', () => polish($, 'general', false, fa, '')).catch(() => '')
+    if (!raw && p.engine !== 'soniox') raw = await spinning($, 'Translating', () => polish($, 'general', false, fa, '')).catch(() => '')
     if (!raw) {
       // A long recording can end before Soniox translates it: Claude translates the Persian, else the Persian goes in.
       $.ui.toast('🎙 The translation did not finish, so Claude translates your words. /fa last shows them.')
@@ -794,7 +796,7 @@ const HELP = `Persian voice
   /fa mode [m]  cleanup: ${MODE_ORDER.join(' · ')}
   /fa polish    cleanup on / off (prompt <-> exact)
   /fa send      auto-send on / off
-  /fa engine [e] speech engine: ${Object.keys(ENGINES).join(' · ')} (google = Gemini 3.5 Transcribe, key in ~/.config/gemini/key)
+  /fa engine [e] speech engine: ${Object.keys(ENGINES).join(' · ')} (google = Gemini 3.5 Transcribe, key in ~/.config/gemini/key; local = Whisper on this Mac, no key)
   /fa mic [n]   list / choose the microphone
   /fa terms     your word list for recognition (one per line, or "persian = english")
   /fa forget w  remove a word that the plugin learned by mistake

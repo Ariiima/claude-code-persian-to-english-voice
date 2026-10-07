@@ -92,7 +92,7 @@ A single tap of <kbd>Space</kbd> still types a space.
 - **Learns your words.** When you correct a technical word before you send, the mod remembers it.
 - **Your words are never lost.** Every recording is saved before any other step.
 - **Optional auto-send,** with a safety stop for requests that cannot be undone (delete, force-push, deploy).
-- **Two engines.** Soniox (default, live translation) or Google Gemini (`/fa engine google`).
+- **Three engines.** Soniox (default, live translation), Google Gemini (`/fa engine google`, free key), or Whisper on your Mac (`/fa engine local`, free, no key, no internet). Only Soniox shows live text; the other two show a level meter and the text appears after you release.
 
 ## Privacy
 
@@ -119,7 +119,9 @@ A single tap of <kbd>Space</kbd> still types a space.
 | A [Soniox](https://soniox.com) API key | Speech recognition and translation. |
 
 **No Soniox account, or no money on it? Use Google, which is free.** Make a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no card), save it in `~/.config/gemini/key` (or set `GEMINI_API_KEY`), then run `/fa engine google`.
-In our test it read Persian with English code words well, but it can swap look-alike words (for example `parseOrder` became "صفات رزرو"). Add such words to your [word list](#your-word-list). The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
+In our test it read Persian with English code words well, but it can swap look-alike words (for example `parseOrder` became "صفات رزرو"). Add such words to your [word list](#your-word-list).
+
+**No key at all? Use Whisper on your Mac (Apple Silicon).** Run `.venv/bin/pip install -r requirements-local.txt`, then `/fa engine local`. The first recording downloads a 1.6 GB model, which can take a long time on a slow connection. After that it works offline, and a short recording is read in about 1 second. In our test it was as accurate as Gemini on Persian, and it also read English-only speech. It has no live text and no translation, so Claude makes the English draft. The engine is `gemini-3.5-transcribe-live`. It only transcribes, so Claude makes the English draft from the transcript. Soniox translates by itself.
 
 </details>
 
@@ -355,7 +357,9 @@ Your mode, auto-send, microphone, hold-Space and shortcut choices are saved in C
 | Variable | Meaning |
 | --- | --- |
 | `SONIOX_API_KEY` | The Soniox key. If it is not set, the key is read from `~/.config/soniox/key`. |
-| `FA_ENGINE` | `soniox` (default) or `google`. |
+| `FA_ENGINE` | `soniox` (default), `google` or `local`. |
+| `FA_LOCAL_MODEL` | The Whisper model for `local`. Default `mlx-community/whisper-large-v3-turbo`. `mlx-community/whisper-small-mlx` is faster but makes many mistakes in Persian. |
+| `FA_LOCAL_LANG` | A language code for `local`, for example `fa`. Default: detect it. Forcing `fa` turned English-only speech into garbage in tests. |
 | `GEMINI_API_KEY` | The Gemini key for `google`. If it is not set, the key is read from `~/.config/gemini/key`. |
 | `FA_GEMINI_MODEL` | The Gemini model. Default `gemini-3.5-transcribe-live`. |
 | `FA_GEMINI_LANGS` | BCP-47 codes to favour, comma separated. Default: `fa-IR`. It still reads English words and English-only speech. Empty means the model detects the language, which split `parseOrder` into "parse order" in tests. |
@@ -401,8 +405,9 @@ tools/rewrite_eval.py        runs the rewrite prompts through Claude and checks 
 tools/prompt_ab.py           compares the prompts of a commit with the current prompts
 tools/prompt_ablation.py     removes one part of the prompts at a time and measures the loss
 types/index.d.ts             types of the mod's shared state
-stt/stream.py                microphone → Soniox stream
+stt/stream.py                microphone → speech engine (Soniox, Gemini or local Whisper)
 requirements.txt             Python dependency
+requirements-local.txt       extra dependency for the local Whisper engine
 ```
 
 Run the checks from the mod folder. Claude Code writes the type definitions to `.claude-plugin/types/` when it loads the mod, so load it once before you type-check.

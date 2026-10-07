@@ -8,6 +8,7 @@ over the Live API; speech only, "en" stays empty and the plugin has Claude trans
 
 Stop: create the file $FA_STOP. The mic closes, the engine finalizes the rest (the English
 lags the spoken text), one last line with "done": true is printed, and the process exits.
+Or "local": Whisper on this Mac (needs requirements-local.txt; $FA_LOCAL_MODEL, $FA_LOCAL_LANG; no key, no live text).
 Soniox key: $SONIOX_API_KEY or ~/.config/soniox/key.
 Gemini key: $GEMINI_API_KEY or ~/.config/gemini/key. $FA_GEMINI_MODEL: default gemini-3.5-transcribe-live.
 $FA_GEMINI_LANGS: comma list of BCP-47 codes to favour (default "fa-IR"; empty = detect by itself).
@@ -74,7 +75,7 @@ async def soniox(ff, final, live, lvl):
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg.get("error_code"):
-                    sys.exit(f"Soniox error: {msg.get('error_message')}")
+                    sys.exit(f"Soniox error: {msg.get('error_message')} (free option: run /fa engine google)")
                 live.update(fa="", en="")
                 for t in msg.get("tokens", []):
                     # "original" = spoken, to translate; "translation" = English of it;
@@ -91,7 +92,9 @@ async def soniox(ff, final, live, lvl):
 
 GEMINI_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="
 GEMINI_MODEL = os.environ.get("FA_GEMINI_MODEL", "gemini-3.5-transcribe-live")
-GEMINI_TAIL_S = 1.5   # after the last audio, this much silence from the server = it has said everything
+# After the last audio, this much silence from the server = it has said everything.
+# Measured on 6 clips: 1.5 s lost the whole text in 3 of 6; 4 s lost none.
+GEMINI_TAIL_S = 4.0
 
 
 async def google(ff, final, live, lvl):
@@ -150,6 +153,35 @@ async def google(ff, final, live, lvl):
         await asyncio.gather(send(), recv())
 
 
+LOCAL_MODEL = os.environ.get("FA_LOCAL_MODEL", "mlx-community/whisper-large-v3-turbo")
+
+
+async def local(ff, final, live, lvl):
+    """Whisper on this Mac (mlx-whisper): free, offline, no key. It does not stream: the text arrives after Stop
+    ("en" stays empty and the plugin has Claude translate it). The first run downloads the model (~1.6 GB)."""
+    try:
+        import numpy as np
+        import mlx_whisper
+    except ImportError:
+        sys.exit("Local engine not installed: run .venv/bin/pip install -r requirements-local.txt")
+    terms = json.loads(os.environ.get("FA_CONTEXT") or "{}").get("terms", [])[:100]
+    # Auto-detect by default: "fa" forced turned English-only speech into garbage (measured on 4 clips).
+    langs = os.environ.get("FA_LOCAL_LANG") or None
+    run = lambda audio: mlx_whisper.transcribe(
+        audio, path_or_hf_repo=LOCAL_MODEL, language=langs, initial_prompt=", ".join(terms) or None,
+        condition_on_previous_text=False)["text"].strip()
+    warm = asyncio.create_task(asyncio.to_thread(run, np.zeros(RATE, np.float32)))  # loads the model while you talk
+    pcm = bytearray()
+    while chunk := await ff.stdout.read(CHUNK):
+        lvl[0] = level(chunk)
+        pcm += chunk
+    lvl[0] = 0.0
+    await warm
+    if len(pcm) > RATE:  # under 0.5 s of audio: nothing to read
+        audio = np.frombuffer(bytes(pcm[: len(pcm) // 2 * 2]), np.int16).astype(np.float32) / 32768
+        final["fa"] = await asyncio.to_thread(run, audio)
+
+
 async def main():
     if os.path.exists(STOP):
         os.remove(STOP)
@@ -176,7 +208,7 @@ async def main():
 
     ticker = asyncio.create_task(tick())
     watcher = asyncio.create_task(watch())
-    await (google if ENGINE == "google" else soniox)(ff, final, live, lvl)
+    await {"google": google, "local": local}.get(ENGINE, soniox)(ff, final, live, lvl)
     ticker.cancel()
     watcher.cancel()
     print(json.dumps({**snap(), "done": True}, ensure_ascii=False), flush=True)
